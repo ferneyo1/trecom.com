@@ -1,0 +1,8 @@
+{
+  "name": "PerfilPro Connect",
+  "description": "An application to connect seekers, recommenders, and professionals, with dedicated dashboards for each user type.",
+  "requestFramePermissions": [
+    "geolocation",
+    "camera"
+  ]
+}
