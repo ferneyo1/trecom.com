@@ -1,16 +1,18 @@
-
-import React, { useState, useEffect } from 'react';
-import { User, UserRole, ProfessionalProfile, RequestStatus, SeekerProfile, Job, Membership, JobApplication, ServiceRequest } from '../../types';
+// Fix: Removed invalid 'aistudio' token from import statement to resolve syntax error.
+import React from 'react';
+import { User, UserRole, ProfessionalProfile, RequestStatus, SeekerProfile, Job, Membership, JobApplication, ServiceRequest, RecommenderProfile, RecommenderPayoutSettings, ApplicationStatus } from '../../types';
 import { Card } from '../shared/Card';
 import { Button } from '../shared/Button';
-import { db, auth } from '../../firebase';
+import { db, auth, storage } from '../../firebase';
 import { Modal } from '../shared/Modal';
-import { collection, query, where, getDocs, doc, getDoc, addDoc, onSnapshot, updateDoc, setDoc, serverTimestamp, Timestamp, increment, writeBatch, runTransaction } from 'firebase/firestore';
+import { collection, query, where, getDocs, doc, getDoc, addDoc, onSnapshot, updateDoc, setDoc, serverTimestamp, Timestamp, increment, runTransaction, deleteDoc, arrayUnion, arrayRemove } from 'firebase/firestore';
+import { ref, getDownloadURL, uploadBytesResumable, UploadTaskSnapshot, uploadBytes } from 'firebase/storage';
 import { updateProfile } from 'firebase/auth';
 import VerifiedBadge from '../shared/VerifiedBadge';
 import Toast from '../shared/Toast';
 import StripeCheckoutForm from '../shared/StripeCheckoutForm';
 import StarRating from '../shared/StarRating';
+import { useLanguage } from '../../contexts/LanguageContext';
 
 interface SeekerDashboardProps {
   user: User;
@@ -28,11 +30,71 @@ interface ProfessionalWithStats extends Professional {
 
 interface JobWithRecommenderRating extends Job {
     recommenderAverageRating: number;
+    recommenderPhotoURL?: string;
 }
 
 type PurchaseAction = 
     | { type: 'unlock_job', job: Job }
     | { type: 'buy_membership', membership: Membership };
+    
+interface ShareContent {
+    title: string;
+    text: string;
+    url: string;
+}
+
+const ApplicationStatusTracker: React.FC<{ status: ApplicationStatus }> = ({ status }) => {
+    const { t } = useLanguage();
+    const steps = [
+        { name: t('seeker.tracker.step1'), statuses: ['submitted'] },
+        { name: t('seeker.tracker.step2'), statuses: ['recommender_rejected'] },
+        { name: t('seeker.tracker.step3'), statuses: ['forwarded_to_company'] },
+        { name: t('seeker.tracker.step4'), statuses: ['under_review', 'interviewing', 'company_rejected', 'hired'] },
+    ];
+
+    let currentStepIndex = 0;
+    if (['recommender_rejected', 'forwarded_to_company', 'under_review', 'interviewing', 'company_rejected', 'hired'].includes(status)) {
+        currentStepIndex = 1;
+    }
+    if (['forwarded_to_company', 'under_review', 'interviewing', 'company_rejected', 'hired'].includes(status)) {
+        currentStepIndex = 2;
+    }
+    if (['under_review', 'interviewing', 'company_rejected', 'hired'].includes(status)) {
+        currentStepIndex = 3;
+    }
+
+    const isRejected = status === 'recommender_rejected' || status === 'company_rejected';
+    const isHired = status === 'hired';
+
+    return (
+        <div className="w-full mt-2">
+            <h4 className="text-sm font-semibold mb-2">{t('seeker.applicationStatusTracker')}</h4>
+            <div className="flex items-center">
+                {steps.map((step, index) => (
+                    <React.Fragment key={index}>
+                        <div className="flex flex-col items-center">
+                            <div className={`w-6 h-6 rounded-full flex items-center justify-center text-white ${
+                                index <= currentStepIndex ? (isRejected ? 'bg-red-500' : isHired ? 'bg-green-500' : 'bg-indigo-600') : 'bg-slate-300 dark:bg-slate-600'
+                            }`}>
+                                {index < currentStepIndex || isHired ? '✓' : index + 1}
+                            </div>
+                            <p className="text-xs text-center mt-1 w-20">{step.name}</p>
+                        </div>
+                        {index < steps.length - 1 && (
+                            <div className={`flex-auto border-t-2 ${
+                                index < currentStepIndex ? (isRejected ? 'border-red-500' : isHired ? 'border-green-500' : 'border-indigo-600') : 'border-slate-300 dark:border-slate-600'
+                            }`}></div>
+                        )}
+                    </React.Fragment>
+                ))}
+            </div>
+            <p className="text-xs text-center mt-3 p-2 bg-slate-100 dark:bg-slate-800 rounded-md">
+                <strong>{t('admin.status')}:</strong> {t(`seeker.applicationStatus.${status}`)}
+            </p>
+        </div>
+    );
+};
+
 
 const MagnifyingGlassIcon: React.FC<{ className?: string }> = ({ className }) => (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className={className}>
@@ -49,87 +111,165 @@ const ClipboardDocumentListIcon: React.FC<{ className?: string }> = ({ className
       <path fillRule="evenodd" d="M12.97 3.97a.75.75 0 011.06 0l7.5 7.5a.75.75 0 010 1.06l-7.5 7.5a.75.75 0 11-1.06-1.06l6.22-6.22H3a.75.75 0 010-1.5h16.19l-6.22-6.22a.75.75 0 010-1.06z" clipRule="evenodd" />
     </svg>
 );
+const ShareIcon: React.FC<{ className?: string }> = ({ className }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={className}>
+      <path d="M13 13.5a2.5 2.5 0 11.702-4.289l-3.296 1.648a2.504 2.504 0 010 1.126l3.296 1.648A2.5 2.5 0 1113 15.5v-1.615a2.5 2.5 0 01-1.298-2.201l-3.296-1.648a2.5 2.5 0 010-1.126l3.296-1.648A2.5 2.5 0 0113 4.5z" />
+    </svg>
+);
+const PencilIcon: React.FC<{ className?: string }> = ({ className }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={className}>
+        <path d="M5.433 13.917l1.262-3.155A4 4 0 017.58 9.42l6.92-6.918a2.121 2.121 0 013 3l-6.92 6.918c-.383.383-.84.685-1.343.886l-3.154 1.262a.5.5 0 01-.65-.65z" />
+        <path d="M3.5 5.75c0-.69.56-1.25 1.25-1.25H10A.75.75 0 0010 3H4.75A2.75 2.75 0 002 5.75v9.5A2.75 2.75 0 004.75 18h9.5A2.75 2.75 0 0017 15.25V10a.75.75 0 00-1.5 0v5.25c0 .69-.56 1.25-1.25-1.25h-9.5c-.69 0-1.25-.56-1.25-1.25v-9.5z" />
+    </svg>
+);
+const TrashIcon: React.FC<{ className?: string }> = ({ className }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={className}>
+        <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.58.22-2.365.468a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193V3.75A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25-.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clipRule="evenodd" />
+    </svg>
+);
+const HeartIcon: React.FC<{ className?: string, solid?: boolean }> = ({ className, solid }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill={solid ? "currentColor" : "none"} stroke="currentColor" className={className}>
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 8.25c0-2.485-2.099-4.5-4.688-4.5-1.935 0-3.597 1.126-4.312 2.733-.715-1.607-2.377-2.733-4.313-2.733C5.1 3.75 3 5.765 3 8.25c0 7.22 9 12 9 12s9-4.78 9-12z" />
+    </svg>
+);
 
 
-
-function SeekerDashboard({ user }: SeekerDashboardProps) {
+// FIX: Export function directly to create a named export.
+export function SeekerDashboard({ user }: SeekerDashboardProps) {
+  const { t } = useLanguage();
   // Search State
-  const [activeTab, setActiveTab] = useState<'professionals' | 'jobs'>('professionals');
-  const [professionalSearchName, setProfessionalSearchName] = useState('');
-  const [professionalSearchSpecialty, setProfessionalSearchSpecialty] = useState('');
-  const [jobSearchTitle, setJobSearchTitle] = useState('');
-  const [jobSearchCompany, setJobSearchCompany] = useState('');
-  const [professionalResults, setProfessionalResults] = useState<ProfessionalWithStats[]>([]);
-  const [jobResults, setJobResults] = useState<JobWithRecommenderRating[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [searched, setSearched] = useState(false);
+  const [activeTab, setActiveTab] = React.useState<'professionals' | 'jobs'>('professionals');
+  const [professionalSearchName, setProfessionalSearchName] = React.useState('');
+  const [professionalSearchSpecialty, setProfessionalSearchSpecialty] = React.useState('');
+  const [jobSearchKeyword, setJobSearchKeyword] = React.useState('');
+  const [jobSearchCity, setJobSearchCity] = React.useState('');
+  const [professionalResults, setProfessionalResults] = React.useState<ProfessionalWithStats[]>([]);
+  const [jobResults, setJobResults] = React.useState<JobWithRecommenderRating[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  const [searched, setSearched] = React.useState(false);
 
   // Profile State
-  const [seekerProfile, setSeekerProfile] = useState<SeekerProfile | null>(null);
-  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
-  const [editName, setEditName] = useState(user.name);
-  const [editPhoneNumber, setEditPhoneNumber] = useState('');
-  const [editAddress, setEditAddress] = useState('');
-  const [editAreaCode, setEditAreaCode] = useState('');
-  const [isSaving, setIsSaving] = useState(false);
-  const [notification, setNotification] = useState<string | null>(null);
-  const [hasActiveMembership, setHasActiveMembership] = useState(false);
-  const [memberships, setMemberships] = useState<Membership[]>([]);
+  const [seekerProfile, setSeekerProfile] = React.useState<SeekerProfile | null>(null);
+  const [isEditModalOpen, setIsEditModalOpen] = React.useState(false);
+  const [editName, setEditName] = React.useState(user.name);
+  const [editPhoneNumber, setEditPhoneNumber] = React.useState('');
+  const [editAddress, setEditAddress] = React.useState('');
+  const [editAreaCode, setEditAreaCode] = React.useState('');
+  const [editDocumentType, setEditDocumentType] = React.useState('');
+  const [editDocumentNumber, setEditDocumentNumber] = React.useState('');
+  const [editCity, setEditCity] = React.useState('');
+  const [editPhotoURL, setEditPhotoURL] = React.useState('');
+  const [editPhotoFile, setEditPhotoFile] = React.useState<File | null>(null);
+  const [editPhotoPreview, setEditPhotoPreview] = React.useState<string | null>(null);
+
+  const [isSaving, setIsSaving] = React.useState(false);
+  const [notification, setNotification] = React.useState<string | null>(null);
+  const [hasActiveMembership, setHasActiveMembership] = React.useState(false);
+  const [memberships, setMemberships] = React.useState<Membership[]>([]);
+  const [globalMaxApplicants, setGlobalMaxApplicants] = React.useState<number | null>(null);
 
   // Modals State
-  const [isRequestModalOpen, setIsRequestModalOpen] = useState(false);
-  const [selectedProfessional, setSelectedProfessional] = useState<Professional | null>(null);
-  const [requestDetails, setRequestDetails] = useState('');
-  const [serviceDate, setServiceDate] = useState('');
-  const [serviceTime, setServiceTime] = useState('');
-  const [isSending, setIsSending] = useState(false);
-  const [isJobDetailsModalOpen, setIsJobDetailsModalOpen] = useState(false);
-  const [selectedJob, setSelectedJob] = useState<Job | null>(null);
-  const [isProfileDetailsModalOpen, setIsProfileDetailsModalOpen] = useState(false);
-  const [selectedProfForDetails, setSelectedProfForDetails] = useState<ProfessionalWithStats | null>(null);
+  const [isContactModalOpen, setIsContactModalOpen] = React.useState(false);
+  const [selectedProfessional, setSelectedProfessional] = React.useState<ProfessionalWithStats | null>(null);
+  const [requestSubject, setRequestSubject] = React.useState('');
+  const [requestDetails, setRequestDetails] = React.useState('');
+  const [serviceDate, setServiceDate] = React.useState('');
+  const [serviceTime, setServiceTime] = React.useState('');
+  const [requestLocation, setRequestLocation] = React.useState<{ latitude: number, longitude: number } | null>(null);
+  const [requestLocationInput, setRequestLocationInput] = React.useState('');
+  const [requestPhotoFile, setRequestPhotoFile] = React.useState<File | null>(null);
+  const [requestPhotoUploadProgress, setRequestPhotoUploadProgress] = React.useState<number | null>(null);
+  const [isSending, setIsSending] = React.useState(false);
+
+  const [isJobDetailsModalOpen, setIsJobDetailsModalOpen] = React.useState(false);
+  const [selectedJob, setSelectedJob] = React.useState<Job | null>(null);
   
   // History and Rating State
-  const [jobApplications, setJobApplications] = useState<JobApplication[]>([]);
-  const [serviceRequests, setServiceRequests] = useState<ServiceRequest[]>([]);
-  const [isRecommenderRatingModalOpen, setIsRecommenderRatingModalOpen] = useState(false);
-  const [selectedApplication, setSelectedApplication] = useState<JobApplication | null>(null);
-  const [recommenderRating, setRecommenderRating] = useState(0);
-  const [isProfRatingModalOpen, setIsProfRatingModalOpen] = useState(false);
-  const [selectedRequest, setSelectedRequest] = useState<ServiceRequest | null>(null);
-  const [professionalRating, setProfessionalRating] = useState(0);
+  const [jobApplications, setJobApplications] = React.useState<JobApplication[]>([]);
+  const [serviceRequests, setServiceRequests] = React.useState<ServiceRequest[]>([]);
+  const [isRecommenderRatingModalOpen, setIsRecommenderRatingModalOpen] = React.useState(false);
+  const [selectedApplication, setSelectedApplication] = React.useState<JobApplication | null>(null);
+  const [recommenderRating, setRecommenderRating] = React.useState(0);
+  const [isProfRatingModalOpen, setIsProfRatingModalOpen] = React.useState(false);
+  const [selectedRequest, setSelectedRequest] = React.useState<ServiceRequest | null>(null);
+  const [professionalRating, setProfessionalRating] = React.useState(0);
 
   // Pagination State
-  const [jobAppsPage, setJobAppsPage] = useState(1);
-  const [serviceRequestsPage, setServiceRequestsPage] = useState(1);
+  const [jobAppsPage, setJobAppsPage] = React.useState(1);
+  const [serviceRequestsPage, setServiceRequestsPage] = React.useState(1);
   const ITEMS_PER_PAGE = 5;
 
   // Job Application Flow State
-  const [isPaywallModalOpen, setIsPaywallModalOpen] = useState(false);
-  const [isApplicationModalOpen, setIsApplicationModalOpen] = useState(false);
-  const [coverLetter, setCoverLetter] = useState('');
-  const [cvFile, setCvFile] = useState<File | null>(null);
+  const [isPaywallModalOpen, setIsPaywallModalOpen] = React.useState(false);
+  const [isApplicationModalOpen, setIsApplicationModalOpen] = React.useState(false);
+  const [coverLetter, setCoverLetter] = React.useState('');
+  const [cvFile, setCvFile] = React.useState<File | null>(null);
+  const [uploadProgress, setUploadProgress] = React.useState<number | null>(null);
+  const [editUploadProgress, setEditUploadProgress] = React.useState<number | null>(null);
+  const [unlockedJobs, setUnlockedJobs] = React.useState<string[]>([]);
+  const [favoriteJobs, setFavoriteJobs] = React.useState<string[]>([]);
+  const [sendToCompany, setSendToCompany] = React.useState(true);
+  const [sendToRecommender, setSendToRecommender] = React.useState(true);
+
 
   // --- REFACTORED PAYMENT STATE ---
-  const [stripe, setStripe] = useState<any>(null);
-  const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
-  const [paymentClientSecret, setPaymentClientSecret] = useState<string | null>(null);
-  const [purchaseAction, setPurchaseAction] = useState<PurchaseAction | null>(null);
-  const [purchaseDisplay, setPurchaseDisplay] = useState<{ name: string; price: number } | null>(null);
+  const [isPaymentModalOpen, setIsPaymentModalOpen] = React.useState(false);
+  const [paymentClientSecret, setPaymentClientSecret] = React.useState<string | null>(null);
+  const [purchaseAction, setPurchaseAction] = React.useState<PurchaseAction | null>(null);
+  const [purchaseDisplay, setPurchaseDisplay] = React.useState<{ name: string; price: number } | null>(null);
+  
+  // --- APPLICATION & REQUEST MANAGEMENT STATE ---
+  const [jobAppSearchTerm, setJobAppSearchTerm] = React.useState('');
+  const [filteredJobApps, setFilteredJobApps] = React.useState<JobApplication[]>([]);
+  const [isEditAppModalOpen, setIsEditAppModalOpen] = React.useState(false);
+  const [appToEdit, setAppToEdit] = React.useState<JobApplication | null>(null);
+  const [editCoverLetter, setEditCoverLetter] = React.useState('');
+  const [editCvFile, setEditCvFile] = React.useState<File | null>(null);
+  const [isDeleteAppModalOpen, setIsDeleteAppModalOpen] = React.useState(false);
+  const [appToDelete, setAppToDelete] = React.useState<JobApplication | null>(null);
+  
+  const [serviceRequestSearchTerm, setServiceRequestSearchTerm] = React.useState('');
+  const [filteredServiceRequests, setFilteredServiceRequests] = React.useState<ServiceRequest[]>([]);
+  const [isEditRequestModalOpen, setIsEditRequestModalOpen] = React.useState(false);
+  const [requestToEdit, setRequestToEdit] = React.useState<ServiceRequest | null>(null);
+  const [editRequestDetails, setEditRequestDetails] = React.useState('');
+  const [editServiceDate, setEditServiceDate] = React.useState('');
+  const [editServiceTime, setEditServiceTime] = React.useState('');
+  const [isDeleteRequestModalOpen, setIsDeleteRequestModalOpen] = React.useState(false);
+  const [requestToDelete, setRequestToDelete] = React.useState<ServiceRequest | null>(null);
+  
+  // --- SHARE MODAL STATE ---
+  const [isShareModalOpen, setIsShareModalOpen] = React.useState(false);
+  const [shareContent, setShareContent] = React.useState<ShareContent | null>(null);
 
-  useEffect(() => {
-    const stripePromise = window.Stripe('pk_test_51Pefp3RqgG8j12HGL2TCAw3Y9f5V4qG6v0E9d2W5A4N0e1c0x3W1N6d4Y9a0T1b2o3a4b5c6d7e8f9');
-    setStripe(stripePromise);
 
+  const jobTypeLabels: { [key in Job['jobType'] & string]: string } = {
+    full_time: t('recommender.fullTime'),
+    part_time: t('recommender.partTime'),
+    remote: t('recommender.remote')
+  };
+
+  React.useEffect(() => {
     const seekerDocRef = doc(db, 'seekers', user.uid);
     const unsubscribeProfile = onSnapshot(seekerDocRef, (docSnap) => {
         if (docSnap.exists()) {
-            const profileData = docSnap.data() as SeekerProfile;
-            setSeekerProfile(profileData);
-            setEditPhoneNumber(profileData.phoneNumber || '');
-            setEditAddress(profileData.address || '');
-            setEditAreaCode(profileData.areaCode || '');
-            const isActive = profileData.membershipEndDate && profileData.membershipEndDate.toDate() > new Date();
+            const data = docSnap.data();
+            const sanitizedData: any = {};
+            for (const key in data) {
+                if (data[key] instanceof Timestamp) {
+                    sanitizedData[key] = data[key].toDate().toISOString();
+                } else {
+                    sanitizedData[key] = data[key];
+                }
+            }
+            const profileData = sanitizedData as SeekerProfile;
+
+            const isActive = profileData.membershipEndDate && new Date(profileData.membershipEndDate) > new Date();
             setHasActiveMembership(isActive);
+
+            setSeekerProfile(profileData);
+            setUnlockedJobs(profileData.unlockedJobs || []);
+            setFavoriteJobs(profileData.favoriteJobs || []);
         }
     });
 
@@ -139,185 +279,320 @@ function SeekerDashboard({ user }: SeekerDashboardProps) {
 
     const applicationsQuery = query(collection(db, 'jobApplications'), where('seekerId', '==', user.uid));
     const unsubscribeApplications = onSnapshot(applicationsQuery, async (snapshot) => {
-        const apps = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as JobApplication));
+        const apps = snapshot.docs.map(doc => {
+            const data = doc.data();
+            const sanitizedData: any = {};
+            for (const key in data) {
+                if (data[key] instanceof Timestamp) {
+                    sanitizedData[key] = data[key].toDate().toISOString();
+                } else {
+                    sanitizedData[key] = data[key];
+                }
+            }
+            return { id: doc.id, ...sanitizedData } as JobApplication;
+        });
+        apps.sort((a,b) => (new Date(b.appliedAt).getTime() || 0) - (new Date(a.appliedAt).getTime() || 0));
         setJobApplications(apps);
     });
     
     const serviceRequestsQuery = query(collection(db, 'serviceRequests'), where('seekerId', '==', user.uid));
     const unsubscribeRequests = onSnapshot(serviceRequestsQuery, snapshot => {
-        const requests = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as ServiceRequest));
-        requests.sort((a,b) => (b.createdAt?.toMillis() || 0) - (a.createdAt?.toMillis() || 0));
+        const requests = snapshot.docs.map(doc => {
+            const data = doc.data();
+            const sanitizedData: any = {};
+            for (const key in data) {
+                if (data[key] instanceof Timestamp) {
+                    sanitizedData[key] = data[key].toDate().toISOString();
+                } else {
+                    sanitizedData[key] = data[key];
+                }
+            }
+            return { id: doc.id, ...sanitizedData } as ServiceRequest;
+        });
+        requests.sort((a,b) => (new Date(b.createdAt).getTime() || 0) - (new Date(a.createdAt).getTime() || 0));
         setServiceRequests(requests);
     });
 
+    const settingsRef = doc(db, 'settings', 'globalConfig');
+    const unsubscribeSettings = onSnapshot(settingsRef, (doc) => {
+        if (doc.exists()) {
+            setGlobalMaxApplicants(doc.data().maxApplicantsGlobal);
+        } else {
+            setGlobalMaxApplicants(null); // No limit set
+        }
+    });
 
     return () => {
         unsubscribeProfile();
         membershipsUnsubscribe();
         unsubscribeApplications();
         unsubscribeRequests();
+        unsubscribeSettings();
     }
   }, [user.uid]);
 
-  useEffect(() => {
+  React.useEffect(() => {
       setEditName(user.name);
   }, [user.name]);
 
+  React.useEffect(() => {
+      const filtered = jobApplications.filter(app =>
+          (app.jobTitle?.toLowerCase().includes(jobAppSearchTerm.toLowerCase()) ||
+           app.jobCompany?.toLowerCase().includes(jobAppSearchTerm.toLowerCase()))
+      );
+      setFilteredJobApps(filtered);
+  }, [jobApplications, jobAppSearchTerm]);
+
+  React.useEffect(() => {
+      const filtered = serviceRequests.filter(req =>
+          req.professionalName.toLowerCase().includes(serviceRequestSearchTerm.toLowerCase())
+      );
+      setFilteredServiceRequests(filtered);
+  }, [serviceRequests, serviceRequestSearchTerm]);
+
   const handleProfessionalSearch = async () => {
-    const usersQuery = query(collection(db, 'users'), where('role', '==', UserRole.PROFESSIONAL));
-    const usersSnapshot = await getDocs(usersQuery);
-    const professionalsPromises = usersSnapshot.docs.map(async (userDoc) => {
-        const professionalUser = { uid: userDoc.id, ...userDoc.data() } as User;
-        const profileDocRef = doc(db, 'professionals', userDoc.id);
-        const profileDoc = await getDoc(profileDocRef);
-        if (profileDoc.exists() && profileDoc.data()?.status === 'approved') {
-             return { ...professionalUser, profile: profileDoc.data() as ProfessionalProfile };
+    setLoading(true);
+    setSearched(true);
+    setProfessionalResults([]);
+    try {
+      const usersQuery = query(collection(db, 'users'), where('role', '==', UserRole.PROFESSIONAL));
+      const usersSnapshot = await getDocs(usersQuery);
+      const professionalsData: Professional[] = [];
+      for (const userDoc of usersSnapshot.docs) {
+        const user = { uid: userDoc.id, ...userDoc.data() } as User;
+        const profProfileDoc = await getDoc(doc(db, 'professionals', user.uid));
+        if (profProfileDoc.exists() && profProfileDoc.data().status === 'approved') {
+          const profileData = profProfileDoc.data();
+          const sanitizedProfileData: any = {};
+            for (const key in profileData) {
+                if (profileData[key] instanceof Timestamp) {
+                    sanitizedProfileData[key] = profileData[key].toDate().toISOString();
+                } else {
+                    sanitizedProfileData[key] = profileData[key];
+                }
+            }
+
+          professionalsData.push({
+            ...user,
+            profile: sanitizedProfileData as ProfessionalProfile,
+          });
         }
-        return null;
-    });
-    const allProfessionals = (await Promise.all(professionalsPromises)).filter(p => p !== null) as Professional[];
+      }
+      const filteredProfessionals = professionalsData.filter(p => {
+        const nameMatch = professionalSearchName ? p.name.toLowerCase().includes(professionalSearchName.toLowerCase()) : true;
+        const specialtyMatch = professionalSearchSpecialty ? p.profile.specialty.toLowerCase().includes(professionalSearchSpecialty.toLowerCase()) : true;
+        return nameMatch && specialtyMatch;
+      });
+      
+      const allAttendedRequestsQuery = query(collection(db, 'serviceRequests'), where('attendedDate', '!=', null));
+      const allAttendedRequestsSnapshot = await getDocs(allAttendedRequestsQuery);
+      
+      const successfulServicesCount = allAttendedRequestsSnapshot.docs.reduce((acc, doc) => {
+          const professionalId = doc.data().professionalId;
+          acc[professionalId] = (acc[professionalId] || 0) + 1;
+          return acc;
+      }, {} as { [key: string]: number });
 
-    const filteredProfessionals = allProfessionals.filter(prof => 
-        prof.name.toLowerCase().includes(professionalSearchName.toLowerCase()) &&
-        prof.profile.specialty.toLowerCase().includes(professionalSearchSpecialty.toLowerCase())
-    );
+      const professionalsWithStats: ProfessionalWithStats[] = filteredProfessionals.map(prof => {
+          const reviewCount = prof.ratingCount || 0;
+          const averageRating = prof.averageRating || 0;
+          const successfulServices = successfulServicesCount[prof.uid] || 0;
+          return { ...prof, reviewCount, averageRating, successfulServices };
+      });
 
-    const professionalsWithStatsPromises = filteredProfessionals.map(async (prof) => {
-        const requestsQuery = query(collection(db, 'serviceRequests'), where('professionalId', '==', prof.uid));
-        const requestsSnapshot = await getDocs(requestsQuery);
+      setProfessionalResults(professionalsWithStats);
 
-        let totalRating = 0;
-        let reviewCount = 0;
-        let successfulServices = 0;
-
-        requestsSnapshot.forEach(doc => {
-            const requestData = doc.data();
-            if (requestData.attendedDate) {
-                successfulServices++;
-            }
-            if (requestData.professionalRating) {
-                totalRating += requestData.professionalRating;
-                reviewCount++;
-            }
-        });
-
-        const averageRating = reviewCount > 0 ? totalRating / reviewCount : 0;
-
-        return {
-            ...prof,
-            averageRating,
-            reviewCount,
-            successfulServices,
-        };
-    });
-
-    const resultsWithStats = await Promise.all(professionalsWithStatsPromises);
-    setProfessionalResults(resultsWithStats);
+    } catch (error) {
+      console.error("Error searching professionals:", error);
+      setNotification(t('seeker.errorSearchingProfessionals') || "Error al buscar profesionales.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleJobSearch = async () => {
-    const jobsSnapshot = await getDocs(collection(db, 'jobs'));
-    const allJobs = jobsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Job));
-
-    const filteredJobs = allJobs.filter(job => 
-        job.title.toLowerCase().includes(jobSearchTitle.toLowerCase()) &&
-        job.company.toLowerCase().includes(jobSearchCompany.toLowerCase())
-    );
-
-    if (filteredJobs.length === 0) {
-        setJobResults([]);
-        return;
-    }
-
-    const recommenderIds = [...new Set(filteredJobs.map(job => job.recommenderId))];
-    const recommendersQuery = query(collection(db, 'users'), where('__name__', 'in', recommenderIds));
-    const recommendersSnapshot = await getDocs(recommendersQuery);
-    const recommendersMap = new Map<string, User>();
-    recommendersSnapshot.forEach(doc => {
-        recommendersMap.set(doc.id, doc.data() as User);
-    });
-
-    const jobsWithRecommenderData = filteredJobs.map(job => {
-        const recommender = recommendersMap.get(job.recommenderId);
-        return {
-            ...job,
-            recommenderAverageRating: recommender?.averageRating || 0,
-        };
-    });
-
-    setJobResults(jobsWithRecommenderData);
-  };
-
-  const handleSearch = async (e: React.FormEvent) => {
-    e.preventDefault();
     setLoading(true);
     setSearched(true);
+    setJobResults([]);
     try {
-        if (activeTab === 'professionals') {
-            await handleProfessionalSearch();
-        } else {
-            await handleJobSearch();
-        }
+        const q = query(collection(db, 'jobs'), where('status', '==', 'active'));
+        const jobsSnapshot = await getDocs(q);
+        const allJobs = jobsSnapshot.docs.map(doc => {
+            const data = doc.data();
+            const sanitizedData: any = {};
+            for (const key in data) {
+                if (data[key] instanceof Timestamp) {
+                    sanitizedData[key] = data[key].toDate().toISOString();
+                } else {
+                    sanitizedData[key] = data[key];
+                }
+            }
+            return { id: doc.id, ...sanitizedData } as Job;
+        });
+
+        const filteredJobs = allJobs.filter(job => {
+            const keywordMatch = jobSearchKeyword 
+                ? (job.title.toLowerCase().includes(jobSearchKeyword.toLowerCase()) ||
+                   job.company.toLowerCase().includes(jobSearchKeyword.toLowerCase()) ||
+                   job.description.toLowerCase().includes(jobSearchKeyword.toLowerCase()) ||
+                   job.tasks?.some(t => t.toLowerCase().includes(jobSearchKeyword.toLowerCase())))
+                : true;
+            
+            const cityMatch = jobSearchCity 
+                ? job.city?.toLowerCase().includes(jobSearchCity.toLowerCase())
+                : true;
+
+            return keywordMatch && cityMatch;
+        });
+        
+        const jobsWithRatings: JobWithRecommenderRating[] = await Promise.all(
+            filteredJobs.map(async job => {
+                const recommenderDoc = await getDoc(doc(db, 'users', job.recommenderId));
+                const recommenderProfileDoc = await getDoc(doc(db, 'recommenders', job.recommenderId));
+                return {
+                    ...job,
+                    recommenderAverageRating: recommenderDoc.exists() ? (recommenderDoc.data().averageRating || 0) : 0,
+                    recommenderPhotoURL: recommenderProfileDoc.exists() ? (recommenderProfileDoc.data().photoURL) : undefined
+                };
+            })
+        );
+        
+        jobsWithRatings.sort((a, b) => (new Date(b.createdAt).getTime() || 0) - (new Date(a.createdAt).getTime() || 0));
+        setJobResults(jobsWithRatings);
+
     } catch (error) {
-        console.error("Error during search:", error);
-        alert("Ocurrió un error al realizar la búsqueda.");
+        console.error("Error searching jobs:", error);
+        setNotification(t('seeker.errorSearchingJobs') || "Error al buscar empleos.");
     } finally {
         setLoading(false);
     }
   };
 
-  const handleOpenRequestModal = (professional: Professional) => {
-    setSelectedProfessional(professional);
-    setRequestDetails('');
-    setServiceDate('');
-    setServiceTime('');
-    setIsProfileDetailsModalOpen(false); // Close details modal
-    setIsRequestModalOpen(true);
-  };
-
-  const handleOpenJobDetailsModal = (job: Job) => {
-    setSelectedJob(job);
-    setIsJobDetailsModalOpen(true);
-  };
-  
-  const handleOpenProfileDetailsModal = (professional: ProfessionalWithStats) => {
-    setSelectedProfForDetails(professional);
-    setIsProfileDetailsModalOpen(true);
-  }
-
-  const handleSendRequest = async (e: React.FormEvent) => {
-      e.preventDefault();
-      if (!serviceDate || !serviceTime || !selectedProfessional) {
-          alert("Por favor, complete la fecha y hora del servicio.");
-          return;
-      }
-      setIsSending(true);
-      try {
-          await addDoc(collection(db, 'serviceRequests'), {
-              seekerId: user.uid,
-              seekerName: user.name,
-              seekerEmail: user.email,
-              seekerPhone: seekerProfile?.phoneNumber || '',
-              professionalId: selectedProfessional.uid,
-              professionalName: selectedProfessional.name,
-              requestDetails: requestDetails,
-              status: RequestStatus.LOCKED,
-              createdAt: serverTimestamp(),
-              serviceDate: Timestamp.fromDate(new Date(serviceDate)),
-              serviceTime: serviceTime,
-          });
-          setIsRequestModalOpen(false);
-          setNotification("¡Solicitud enviada con éxito!");
-          setTimeout(() => setNotification(null), 3000);
-      } catch (error) {
-          console.error("Error sending request:", error);
-      } finally {
-          setIsSending(false);
-      }
-  };
-  
   const handleOpenEditModal = () => {
+    setEditName(user.name);
+    if (seekerProfile) {
+        setEditPhoneNumber(seekerProfile.phoneNumber || '');
+        setEditAddress(seekerProfile.address || '');
+        setEditAreaCode(seekerProfile.areaCode || '');
+        setEditDocumentType(seekerProfile.documentType || '');
+        setEditDocumentNumber(seekerProfile.documentNumber || '');
+        setEditCity(seekerProfile.city || '');
+        setEditPhotoURL(seekerProfile.photoURL || '');
+        setEditPhotoPreview(seekerProfile.photoURL || null);
+    }
+    setEditPhotoFile(null);
     setIsEditModalOpen(true);
+  };
+  
+  const handleSaveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSaving(true);
+    try {
+      if (auth.currentUser && auth.currentUser.displayName !== editName) {
+        await updateProfile(auth.currentUser, { displayName: editName });
+      }
+      await updateDoc(doc(db, 'users', user.uid), { name: editName });
+      
+      let photoDownloadURL = editPhotoURL;
+      if (editPhotoFile) {
+        const storageRef = ref(storage, `seeker_avatars/${user.uid}`);
+        await uploadBytes(storageRef, editPhotoFile);
+        photoDownloadURL = await getDownloadURL(storageRef);
+      }
+      
+      const profileData: Partial<SeekerProfile> = {
+        phoneNumber: editPhoneNumber,
+        address: editAddress,
+        areaCode: editAreaCode,
+        documentType: editDocumentType,
+        documentNumber: editDocumentNumber,
+        city: editCity,
+        photoURL: photoDownloadURL,
+      };
+
+      await setDoc(doc(db, 'seekers', user.uid), profileData, { merge: true });
+      setNotification(t('seeker.profileUpdatedSuccessfully'));
+      setTimeout(() => setNotification(null), 3000);
+      setIsEditModalOpen(false);
+    } catch (error) {
+      console.error("Error updating profile:", error);
+      setNotification('Error al actualizar el perfil.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handlePhotoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+        const file = e.target.files[0];
+        setEditPhotoFile(file);
+        setEditPhotoPreview(URL.createObjectURL(file));
+    }
+  };
+  
+  const handleOpenContactModal = (prof: ProfessionalWithStats) => {
+    setSelectedProfessional(prof);
+    setIsContactModalOpen(true);
+  };
+  
+  const handleSendRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedProfessional) return;
+    setIsSending(true);
+    setRequestPhotoUploadProgress(0);
+
+    let photoURL: string | undefined = undefined;
+
+    try {
+        if (requestPhotoFile) {
+            const newRequestRef = doc(collection(db, 'serviceRequests')); // Create ref to get ID
+            const photoStorageRef = ref(storage, `service_requests/${newRequestRef.id}/${requestPhotoFile.name}`);
+            
+            photoURL = await new Promise<string>((resolve, reject) => {
+                const uploadTask = uploadBytesResumable(photoStorageRef, requestPhotoFile);
+                uploadTask.on('state_changed',
+                    (snapshot: UploadTaskSnapshot) => setRequestPhotoUploadProgress((snapshot.bytesTransferred / snapshot.totalBytes) * 100),
+                    (error) => { console.error("Upload error:", error); reject(error); },
+                    async () => resolve(await getDownloadURL(uploadTask.snapshot.ref))
+                );
+            });
+        }
+        
+        const requestData: Omit<ServiceRequest, 'id' | 'createdAt' | 'attendedDate'> = {
+            seekerId: user.uid,
+            seekerName: user.name,
+            seekerEmail: user.email,
+            seekerPhone: seekerProfile?.phoneNumber,
+            professionalId: selectedProfessional.uid,
+            professionalName: selectedProfessional.name,
+            requestSubject: requestSubject,
+            requestDetails: requestDetails,
+            requestPhotoURL: photoURL,
+            status: RequestStatus.LOCKED,
+            serviceDate: serviceDate || undefined,
+            serviceTime: serviceTime || undefined,
+            seekerLocation: requestLocationInput || requestLocation || undefined
+        };
+        await addDoc(collection(db, 'serviceRequests'), {
+            ...requestData,
+            createdAt: serverTimestamp(),
+        });
+        setNotification(t('seeker.requestSentSuccessfully'));
+        setTimeout(() => setNotification(null), 3000);
+        setIsContactModalOpen(false);
+        setRequestSubject('');
+        setRequestDetails('');
+        setServiceDate('');
+        setServiceTime('');
+        setRequestLocationInput('');
+        setRequestPhotoFile(null);
+
+    } catch (error) {
+        console.error("Error sending request:", error);
+    } finally {
+        setIsSending(false);
+        setRequestPhotoUploadProgress(null);
+    }
   };
   
   const handleShareLocation = () => {
@@ -325,599 +600,894 @@ function SeekerDashboard({ user }: SeekerDashboardProps) {
         navigator.geolocation.getCurrentPosition(
             (position) => {
                 const { latitude, longitude } = position.coords;
-                setEditAddress(`Lat: ${latitude.toFixed(4)}, Lon: ${longitude.toFixed(4)}`);
-                setNotification('Ubicación obtenida con éxito.');
+                setRequestLocation({ latitude, longitude });
+                setRequestLocationInput(`${latitude.toFixed(5)}, ${longitude.toFixed(5)}`);
+                setNotification(t('seeker.locationObtained'));
                 setTimeout(() => setNotification(null), 3000);
             },
-            (error) => {
-                alert("No se pudo obtener la ubicación.");
-                console.error("Geolocation error:", error);
+            () => {
+                alert(t('seeker.couldNotGetLocation'));
             }
         );
     } else {
-        alert("La geolocalización no es compatible con este navegador.");
+        alert(t('seeker.geolocationNotSupported'));
     }
   };
 
-  const handleSaveProfile = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSaving(true);
-    try {
-        if (auth.currentUser && auth.currentUser.displayName !== editName) {
-            await updateProfile(auth.currentUser, { displayName: editName });
-        }
-        await updateDoc(doc(db, 'users', user.uid), { name: editName });
-        await setDoc(doc(db, 'seekers', user.uid), { 
-            phoneNumber: editPhoneNumber,
-            address: editAddress,
-            areaCode: editAreaCode,
-        }, { merge: true });
-        setNotification('Perfil actualizado con éxito.');
-        setTimeout(() => setNotification(null), 3000);
-        setIsEditModalOpen(false);
-    } catch (error) {
-        console.error("Error updating profile:", error);
-    } finally {
-        setIsSaving(false);
-    }
+  const handleOpenJobDetails = (job: Job) => {
+    setSelectedJob(job);
+    setIsJobDetailsModalOpen(true);
   };
   
-  // Job Application Flow Functions
-  const handleApplyClick = (job: Job) => {
-      setSelectedJob(job);
-      setIsJobDetailsModalOpen(false); // Close details
-      if(hasActiveMembership) {
-          setIsApplicationModalOpen(true); // Open application form directly
-      } else {
-          setIsPaywallModalOpen(true); // Open payment options
+  const handleOpenPaywall = (job: Job) => {
+    setIsJobDetailsModalOpen(false);
+    setIsPaywallModalOpen(true);
+  };
+
+  const startPaymentProcess = (action: PurchaseAction, display: { name: string, price: number }) => {
+    setPurchaseAction(action);
+    setPurchaseDisplay(display);
+    const simulatedSecret = `pi_${Date.now()}_secret_${Math.random().toString(36).substring(2)}`;
+    setPaymentClientSecret(simulatedSecret);
+    setIsPaymentModalOpen(true);
+  };
+
+  const handleJobUnlockPayment = (job: Job) => {
+    setIsPaywallModalOpen(false);
+    const action: PurchaseAction = { type: 'unlock_job', job };
+    const display = { name: `${t('seeker.singlePaymentDescription')} ${job.title}`, price: 1.00 };
+    startPaymentProcess(action, display);
+  };
+
+  const handleMembershipPayment = (membership: Membership) => {
+    setIsPaywallModalOpen(false);
+    const action: PurchaseAction = { type: 'buy_membership', membership };
+    const display = { name: `${t('seeker.buyMembership')} ${membership.name}`, price: membership.price };
+    startPaymentProcess(action, display);
+  };
+  
+  const handlePaymentSuccess = async () => {
+    if (!purchaseAction) return;
+    try {
+      const seekerRef = doc(db, 'seekers', user.uid);
+      if (purchaseAction.type === 'unlock_job') {
+        const { job } = purchaseAction;
+        
+        const currentProfile = await getDoc(seekerRef);
+        const currentUnlocked = currentProfile.data()?.unlockedJobs || [];
+        
+        await setDoc(seekerRef, {
+            unlockedJobs: [...currentUnlocked, job.id]
+        }, { merge: true });
+        
+        setNotification(t('seeker.jobUnlockedSuccess'));
+        setTimeout(() => setNotification(null), 4000);
+        
+        closePaymentModal();
+        handleOpenJobDetails(job);
+        
+      } else if (purchaseAction.type === 'buy_membership') {
+        const { membership } = purchaseAction;
+        const endDate = new Date();
+        endDate.setDate(endDate.getDate() + membership.durationDays);
+        await setDoc(seekerRef, {
+          activeMembershipId: membership.id,
+          membershipEndDate: Timestamp.fromDate(endDate)
+        }, { merge: true });
+        setNotification(t('seeker.membershipBenefit'));
+        setTimeout(() => setNotification(null), 3000);
+        closePaymentModal();
       }
-  }
+    } catch (error) {
+        console.error("Error confirming purchase:", error);
+        setNotification(t('seeker.errorConfirmingPurchase'));
+        setTimeout(() => setNotification(null), 3000);
+        closePaymentModal();
+    }
+  };
 
-  const startPaymentProcess = (action: PurchaseAction, display: { name: string; price: number }) => {
-        setPurchaseAction(action);
-        setPurchaseDisplay(display);
-        
-        const simulatedSecret = `pi_${Date.now()}_secret_${Math.random().toString(36).substring(2)}`;
-        setPaymentClientSecret(simulatedSecret);
-        setIsPaymentModalOpen(true);
-    };
+  const closePaymentModal = () => {
+    setIsPaymentModalOpen(false);
+    setPaymentClientSecret(null);
+    setPurchaseAction(null);
+    setPurchaseDisplay(null);
+  };
 
-    const handleUnlockJobPayment = (job: Job) => {
-        setIsPaywallModalOpen(false);
-        const action: PurchaseAction = { type: 'unlock_job', job };
-        const display = { name: `Postulación a: ${job.title}`, price: 2.00 }; // Example price
-        startPaymentProcess(action, display);
-    };
+  const handleOpenApplicationModal = (job: Job) => {
+    setSelectedJob(job);
+    setIsJobDetailsModalOpen(false);
+    setIsApplicationModalOpen(true);
+  };
 
-    const handleMembershipPayment = (membership: Membership) => {
-        setIsPaywallModalOpen(false);
-        const action: PurchaseAction = { type: 'buy_membership', membership };
-        const display = { name: `Membresía ${membership.name}`, price: membership.price };
-        startPaymentProcess(action, display);
-    };
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+      setCvFile(e.target.files[0]);
+    }
+  };
 
-    const handlePaymentSuccess = async () => {
-        if (!purchaseAction) return;
-        
-        try {
-            if (purchaseAction.type === 'unlock_job') {
-                setIsApplicationModalOpen(true);
-            } else if (purchaseAction.type === 'buy_membership') {
-                const { membership } = purchaseAction;
-                const endDate = new Date();
-                endDate.setDate(endDate.getDate() + membership.durationDays);
-                const seekerRef = doc(db, 'seekers', user.uid);
-                await updateDoc(seekerRef, {
-                    activeMembershipId: membership.id,
-                    membershipEndDate: Timestamp.fromDate(endDate)
-                });
-                setHasActiveMembership(true);
-                setIsApplicationModalOpen(true);
+  const handleSubmitApplication = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedJob || !cvFile) {
+        setNotification(t('seeker.attachResume'));
+        return;
+    }
+    if (!sendToCompany && !sendToRecommender) {
+        setNotification(t('seeker.atLeastOneOption'));
+        return;
+    }
+
+    setIsSending(true);
+    setUploadProgress(0);
+
+    const newAppRef = doc(collection(db, 'jobApplications'));
+    const storageRef = ref(storage, `cvs/${user.uid}/${newAppRef.id}/${cvFile.name}`);
+
+    try {
+        // 1. Upload CV
+        const downloadURL = await new Promise<string>((resolve, reject) => {
+            const uploadTask = uploadBytesResumable(storageRef, cvFile);
+            uploadTask.on('state_changed',
+                (snapshot: UploadTaskSnapshot) => setUploadProgress((snapshot.bytesTransferred / snapshot.totalBytes) * 100),
+                (error) => { console.error("Upload error:", error); reject(error); },
+                async () => resolve(await getDownloadURL(uploadTask.snapshot.ref))
+            );
+        });
+
+        // 2. Run DB Transaction
+        let newCount = 0;
+        const newStatus: ApplicationStatus = sendToCompany ? 'forwarded_to_company' : 'submitted';
+        await runTransaction(db, async (transaction) => {
+            const jobRef = doc(db, 'jobs', selectedJob.id);
+            const jobDoc = await transaction.get(jobRef);
+            if (!jobDoc.exists()) throw new Error("Job does not exist!");
+
+            const currentCount = jobDoc.data().applicantCount || 0;
+            if (globalMaxApplicants !== null && currentCount >= globalMaxApplicants) {
+                throw new Error("Job has reached its applicant limit.");
             }
-            setNotification("¡Pago completado! Ahora puede postularse.");
-            setTimeout(() => setNotification(null), 5000);
-        } catch (error) {
-            console.error("Error confirming purchase:", error);
-        } finally {
-            closePaymentModal();
-        }
-    };
-    
-    const closePaymentModal = () => {
-        setIsPaymentModalOpen(false);
-        setPaymentClientSecret(null);
-        setPurchaseAction(null);
-        setPurchaseDisplay(null);
-    };
-
-    const handleSendApplication = async (e: React.FormEvent) => {
-        e.preventDefault();
-        if (!selectedJob || !cvFile) {
-            alert("Por favor, adjunte su hoja de vida.");
-            return;
-        }
-        setIsSending(true);
-        try {
-            const cvUrl = `resumes/${user.uid}/${cvFile.name}`;
-            const batch = writeBatch(db);
             
-            const appRef = doc(collection(db, 'jobApplications'));
-            batch.set(appRef, {
+            newCount = currentCount + 1;
+            transaction.update(jobRef, { applicantCount: increment(1) });
+            
+            transaction.set(newAppRef, {
                 jobId: selectedJob.id,
                 seekerId: user.uid,
+                seekerName: user.name,
                 recommenderId: selectedJob.recommenderId,
-                cvUrl: cvUrl,
+                cvUrl: downloadURL,
                 coverLetter: coverLetter,
                 appliedAt: serverTimestamp(),
                 jobTitle: selectedJob.title,
                 jobCompany: selectedJob.company,
                 recommenderName: selectedJob.recommenderName,
+                status: newStatus,
+            });
+        });
+
+        // 3. Send Emails
+        if (sendToCompany && selectedJob.contactEmail) {
+            const recommenderUserDoc = await getDoc(doc(db, 'users', selectedJob.recommenderId));
+            const recommenderProfileDoc = await getDoc(doc(db, 'recommenders', selectedJob.recommenderId));
+            const seekerProfileDoc = await getDoc(doc(db, 'seekers', user.uid));
+            
+            const recommenderEmail = recommenderUserDoc.data()?.email || 'N/A';
+            const recommenderPhone = recommenderProfileDoc.data()?.phone || 'N/A';
+            const seekerPhone = seekerProfileDoc.data()?.phoneNumber || 'N/A';
+
+            await addDoc(collection(db, "mail"), {
+                to: [selectedJob.contactEmail],
+                message: {
+                    subject: t('emails.seekerToCompany.subject', { applicationId: newAppRef.id }),
+                    html: t('emails.seekerToCompany.body', {
+                        companyName: selectedJob.company,
+                        seekerName: user.name,
+                        jobTitle: selectedJob.title,
+                        seekerEmail: user.email,
+                        seekerPhone: seekerPhone,
+                        cvUrl: downloadURL,
+                        recommenderName: selectedJob.recommenderName,
+                        recommenderEmail: recommenderEmail,
+                        recommenderPhone: recommenderPhone,
+                    }),
+                },
+            });
+        }
+
+        if (sendToRecommender) {
+            const recommenderUserDoc = await getDoc(doc(db, 'users', selectedJob.recommenderId));
+            const recommenderEmail = recommenderUserDoc.data()?.email;
+            if (recommenderEmail) {
+                await addDoc(collection(db, "mail"), {
+                    to: [recommenderEmail],
+                    message: {
+                        subject: t('emails.seekerToRecommender.subject', { jobTitle: selectedJob.title }),
+                        html: t('emails.seekerToRecommender.body', {
+                            recommenderName: selectedJob.recommenderName,
+                            seekerName: user.name,
+                            jobTitle: selectedJob.title,
+                            coverLetter: coverLetter,
+                            cvUrl: downloadURL,
+                        }),
+                    },
+                });
+            }
+        }
+        
+        // 4. Send Seeker Confirmation
+        await addDoc(collection(db, "mail"), {
+            to: [user.email],
+            message: {
+                subject: `${t('seeker.applicationConfirmation')}: ${selectedJob.title}`,
+                html: t('seeker.seekerApplicationEmailBody', {
+                    seekerName: user.name,
+                    jobTitle: selectedJob.title,
+                    companyName: selectedJob.company,
+                    confirmationNumber: newAppRef.id,
+                }),
+            },
+        });
+
+        setNotification(t('seeker.applicationSentSuccessfully'));
+        setIsApplicationModalOpen(false);
+        setCoverLetter('');
+        setCvFile(null);
+
+    } catch (error: any) {
+        console.error("Error submitting application:", error);
+        setNotification(t('seeker.errorSubmittingApplication'));
+    } finally {
+        setIsSending(false);
+        setUploadProgress(null);
+    }
+  };
+    
+  // --- APPLICATION & REQUEST MANAGEMENT HANDLERS ---
+  const handleOpenEditApp = (app: JobApplication) => {
+    setAppToEdit(app);
+    setEditCoverLetter(app.coverLetter);
+    setIsEditAppModalOpen(true);
+  };
+    
+  const handleUpdateApplication = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!appToEdit) return;
+    setIsSending(true);
+    setEditUploadProgress(0);
+    try {
+      let downloadURL = appToEdit.cvUrl;
+      if (editCvFile) {
+        const storageRef = ref(storage, `cvs/${user.uid}/${appToEdit.id}/${editCvFile.name}`);
+        downloadURL = await new Promise<string>((resolve, reject) => {
+            const uploadTask = uploadBytesResumable(storageRef, editCvFile);
+            uploadTask.on('state_changed', 
+                (snapshot) => setEditUploadProgress((snapshot.bytesTransferred / snapshot.totalBytes) * 100),
+                (error) => reject(error),
+                async () => resolve(await getDownloadURL(uploadTask.snapshot.ref))
+            );
+        });
+      }
+      await updateDoc(doc(db, 'jobApplications', appToEdit.id), {
+        coverLetter: editCoverLetter,
+        cvUrl: downloadURL,
+      });
+      setNotification(t('seeker.applicationUpdated'));
+      setIsEditAppModalOpen(false);
+    } catch (error) {
+      console.error(error);
+      setNotification(t('seeker.errorSubmittingApplication'));
+    } finally {
+      setIsSending(false);
+      setEditUploadProgress(null);
+      setEditCvFile(null);
+    }
+  };
+
+  const handleOpenDeleteApp = (app: JobApplication) => {
+    setAppToDelete(app);
+    setIsDeleteAppModalOpen(true);
+  };
+    
+  const handleConfirmDeleteApp = async () => {
+    if (!appToDelete) return;
+    setIsSending(true);
+    try {
+      await deleteDoc(doc(db, 'jobApplications', appToDelete.id));
+      await runTransaction(db, async (transaction) => {
+        const jobRef = doc(db, 'jobs', appToDelete.jobId);
+        transaction.update(jobRef, { applicantCount: increment(-1) });
+      });
+      setNotification(t('seeker.applicationWithdrawnSuccessfully'));
+      setIsDeleteAppModalOpen(false);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+    const handleOpenShareModal = (item: Professional | RecommenderProfile, name: string, type: 'professional' | 'recommender') => {
+        const text = type === 'professional' 
+            ? t('seeker.shareProfessionalMsg') + ` ${name}`
+            : t('seeker.shareRecommenderMsg') + ` ${name}`;
+        
+        const url = window.top.location.href; // Simplified for now
+        setShareContent({ title: t('seeker.shareRecommendation'), text, url });
+        setIsShareModalOpen(true);
+    };
+
+    const handleCopyToClipboard = () => {
+        if (shareContent) {
+            navigator.clipboard.writeText(`${shareContent.text} ${shareContent.url}`);
+            setNotification(t('seeker.copied'));
+            setTimeout(() => setNotification(null), 2000);
+        }
+    };
+
+    const handleToggleFavorite = async (jobId: string) => {
+        const seekerRef = doc(db, 'seekers', user.uid);
+        if (favoriteJobs.includes(jobId)) {
+            // Remove from favorites
+            await updateDoc(seekerRef, {
+                favoriteJobs: arrayRemove(jobId)
+            });
+        } else {
+            // Add to favorites
+            await updateDoc(seekerRef, {
+                favoriteJobs: arrayUnion(jobId)
+            });
+        }
+    };
+
+    const getRequestStatusInfo = (req: ServiceRequest) => {
+        if (req.attendedDate) {
+            return { text: t('seeker.requestStatus.completed'), color: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300' };
+        }
+        switch (req.status) {
+            case RequestStatus.LOCKED:
+                return { text: t('seeker.requestStatus.in_process'), color: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300' };
+            case RequestStatus.UNLOCKED:
+                return { text: t('seeker.requestStatus.accepted'), color: 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300' };
+            default:
+                return { text: req.status, color: 'bg-slate-100 text-slate-800 dark:bg-slate-700 dark:text-slate-300' };
+        }
+    };
+
+    const handleRateProfessional = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!selectedRequest || professionalRating === 0) return;
+        setIsSending(true);
+        try {
+            await runTransaction(db, async (transaction) => {
+                const professionalUserRef = doc(db, 'users', selectedRequest.professionalId);
+                const requestRef = doc(db, 'serviceRequests', selectedRequest.id);
+                
+                const profDoc = await transaction.get(professionalUserRef);
+                if (!profDoc.exists()) {
+                    throw new Error("Professional not found!");
+                }
+                
+                // Update the service request with the rating
+                transaction.update(requestRef, { clientRating: professionalRating });
+                
+                // Update professional's average rating
+                const oldRatingCount = profDoc.data().ratingCount || 0;
+                const oldAverageRating = profDoc.data().averageRating || 0;
+                const newRatingCount = oldRatingCount + 1;
+                const newAverageRating = ((oldAverageRating * oldRatingCount) + professionalRating) / newRatingCount;
+                
+                transaction.update(professionalUserRef, {
+                    ratingCount: newRatingCount,
+                    averageRating: newAverageRating
+                });
             });
 
-            const jobRef = doc(db, 'jobs', selectedJob.id);
-            batch.update(jobRef, { applicantCount: increment(1) });
-
-            await batch.commit();
-
-            setNotification("¡Postulación enviada con éxito!");
-            setTimeout(() => setNotification(null), 3000);
-            setIsApplicationModalOpen(false);
-            setCoverLetter('');
-            setCvFile(null);
-        } catch(error) {
-            console.error("Error sending application:", error);
+            setNotification(t('seeker.ratingSavedSuccessfully'));
+            setIsProfRatingModalOpen(false);
+            setProfessionalRating(0);
+        } catch (error) {
+            console.error("Error saving rating:", error);
+            setNotification(t('seeker.couldNotSaveRating'));
         } finally {
             setIsSending(false);
         }
-    }
-    
-    const handleOpenRecommenderRatingModal = (application: JobApplication) => {
-        setSelectedApplication(application);
-        setRecommenderRating(0);
-        setIsRecommenderRatingModalOpen(true);
     };
-    
-    const handleSaveRecommenderRating = async (e: React.FormEvent) => {
-        e.preventDefault();
-        if (!selectedApplication || recommenderRating === 0) {
-            alert("Por favor, seleccione una calificación.");
-            return;
-        }
-        setIsSaving(true);
-        try {
-            const app = selectedApplication;
-            await runTransaction(db, async (transaction) => {
-                const recommenderRef = doc(db, 'users', app.recommenderId);
-                const appRef = doc(db, 'jobApplications', app.id);
 
-                const recommenderDoc = await transaction.get(recommenderRef);
+    const handleRateRecommender = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!selectedApplication || recommenderRating === 0) return;
+        setIsSending(true);
+        try {
+            await runTransaction(db, async (transaction) => {
+                const recommenderUserRef = doc(db, 'users', selectedApplication.recommenderId);
+                const applicationRef = doc(db, 'jobApplications', selectedApplication.id);
+                
+                const recommenderDoc = await transaction.get(recommenderUserRef);
                 if (!recommenderDoc.exists()) {
                     throw new Error("Recommender not found!");
                 }
-
-                const recommenderData = recommenderDoc.data();
-                const currentAvg = recommenderData.averageRating || 0;
-                const currentCount = recommenderData.ratingCount || 0;
                 
-                const newCount = currentCount + 1;
-                const newAvg = ((currentAvg * currentCount) + recommenderRating) / newCount;
-
-                transaction.update(recommenderRef, {
-                    averageRating: newAvg,
-                    ratingCount: newCount
+                // Update the application with the rating
+                transaction.update(applicationRef, { recommenderRating: recommenderRating });
+                
+                // Update recommender's average rating
+                const oldRatingCount = recommenderDoc.data().ratingCount || 0;
+                const oldAverageRating = recommenderDoc.data().averageRating || 0;
+                const newRatingCount = oldRatingCount + 1;
+                const newAverageRating = ((oldAverageRating * oldRatingCount) + recommenderRating) / newRatingCount;
+                
+                transaction.update(recommenderUserRef, {
+                    ratingCount: newRatingCount,
+                    averageRating: newAverageRating
                 });
-                transaction.update(appRef, { recommenderRating: recommenderRating });
             });
-            
-            setNotification("¡Calificación guardada con éxito!");
-            setTimeout(() => setNotification(null), 3000);
+
+            setNotification(t('seeker.ratingSavedSuccessfully'));
             setIsRecommenderRatingModalOpen(false);
-        } catch(error) {
-            console.error("Error saving rating:", error);
-            alert("No se pudo guardar la calificación.");
+            setRecommenderRating(0);
+        } catch (error) {
+            console.error("Error saving recommender rating:", error);
+            setNotification(t('seeker.couldNotSaveRating'));
         } finally {
-            setIsSaving(false);
+            setIsSending(false);
         }
     };
     
-    const handleOpenProfRatingModal = (request: ServiceRequest) => {
-        setSelectedRequest(request);
-        setProfessionalRating(0);
-        setIsProfRatingModalOpen(true);
-    };
+    // --- JSX FOR THE COMPONENT ---
+    return (
+        <>
+            <Toast message={notification} onClose={() => setNotification(null)} />
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div className="lg:col-span-2 space-y-6">
+                    <Card title={t('seeker.advancedSearch')} icon={<MagnifyingGlassIcon />}>
+                        {/* Tabs */}
+                        <div className="border-b border-gray-200 dark:border-gray-700">
+                            <nav className="-mb-px flex space-x-8" aria-label="Tabs">
+                                <button onClick={() => setActiveTab('professionals')} className={`${activeTab === 'professionals' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}>{t('seeker.professionals')}</button>
+                                <button onClick={() => setActiveTab('jobs')} className={`${activeTab === 'jobs' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}>{t('seeker.jobs')}</button>
+                            </nav>
+                        </div>
+                        {/* Search Forms */}
+                        <div className="py-4">
+                            {activeTab === 'professionals' ? (
+                                <div className="space-y-4">
+                                    <input type="text" placeholder={t('seeker.searchByName')} value={professionalSearchName} onChange={e => setProfessionalSearchName(e.target.value)} className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md" />
+                                    <input type="text" placeholder={t('seeker.searchBySpecialty')} value={professionalSearchSpecialty} onChange={e => setProfessionalSearchSpecialty(e.target.value)} className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md" />
+                                    <Button onClick={handleProfessionalSearch} disabled={loading}>{loading ? t('seeker.searching') : t('seeker.search')}</Button>
+                                </div>
+                            ) : (
+                                <div className="space-y-4">
+                                    <input type="text" placeholder={t('seeker.searchByKeyword')} value={jobSearchKeyword} onChange={e => setJobSearchKeyword(e.target.value)} className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md" />
+                                    <input type="text" placeholder={t('seeker.searchByCity')} value={jobSearchCity} onChange={e => setJobSearchCity(e.target.value)} className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md" />
+                                    <Button onClick={handleJobSearch} disabled={loading}>{loading ? t('seeker.searching') : t('seeker.search')}</Button>
+                                </div>
+                            )}
+                        </div>
+                    </Card>
 
-    const handleSaveProfRating = async (e: React.FormEvent) => {
-        e.preventDefault();
-        if (!selectedRequest || professionalRating === 0) {
-            alert("Por favor, seleccione una calificación.");
-            return;
-        }
-        setIsSaving(true);
-        try {
-            await updateDoc(doc(db, 'serviceRequests', selectedRequest.id), {
-                professionalRating: professionalRating
-            });
-            setNotification("¡Calificación guardada con éxito!");
-            setTimeout(() => setNotification(null), 3000);
-            setIsProfRatingModalOpen(false);
-        } catch (error) {
-            console.error("Error saving professional rating:", error);
-        } finally {
-            setIsSaving(false);
-        }
-    };
-
-    // Pagination Logic for Job Applications
-    const jobAppsTotalPages = Math.ceil(jobApplications.length / ITEMS_PER_PAGE);
-    const jobAppsPaginated = jobApplications.slice((jobAppsPage - 1) * ITEMS_PER_PAGE, jobAppsPage * ITEMS_PER_PAGE);
-
-    // Pagination Logic for Service Requests
-    const serviceRequestsTotalPages = Math.ceil(serviceRequests.length / ITEMS_PER_PAGE);
-    const serviceRequestsPaginated = serviceRequests.slice((serviceRequestsPage - 1) * ITEMS_PER_PAGE, serviceRequestsPage * ITEMS_PER_PAGE);
-
-
-  return (
-    <>
-      <Toast message={notification} onClose={() => setNotification(null)} />
-      <div className="space-y-6">
-        <h2 className="text-2xl font-bold text-slate-900 dark:text-white">Panel de Buscador</h2>
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 space-y-6">
-            <Card title="Búsqueda Avanzada" icon={<MagnifyingGlassIcon />}>
-              <div className="border-b border-slate-200 dark:border-slate-700 mb-4">
-                <nav className="-mb-px flex space-x-6" aria-label="Tabs">
-                    <button onClick={() => setActiveTab('professionals')} className={`${activeTab === 'professionals' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300 dark:text-slate-400 dark:hover:text-slate-300 dark:hover:border-slate-600'} whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm`}>
-                        Profesionales
-                    </button>
-                    <button onClick={() => setActiveTab('jobs')} className={`${activeTab === 'jobs' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300 dark:text-slate-400 dark:hover:text-slate-300 dark:hover:border-slate-600'} whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm`}>
-                        Empleos
-                    </button>
-                </nav>
-              </div>
-
-              <form onSubmit={handleSearch}>
-                {activeTab === 'professionals' ? (
-                    <div className="flex flex-col sm:flex-row gap-2">
-                        <input type="text" value={professionalSearchName} onChange={e => setProfessionalSearchName(e.target.value)} placeholder="Buscar por nombre..." className="flex-grow block w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm" />
-                        <input type="text" value={professionalSearchSpecialty} onChange={e => setProfessionalSearchSpecialty(e.target.value)} placeholder="Buscar por especialidad..." className="flex-grow block w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm" />
-                        <Button type="submit" disabled={loading} className="w-full sm:w-auto">{loading ? 'Buscando...' : 'Buscar'}</Button>
-                    </div>
-                ) : (
-                    <div className="flex flex-col sm:flex-row gap-2">
-                        <input type="text" value={jobSearchTitle} onChange={e => setJobSearchTitle(e.target.value)} placeholder="Buscar por título de empleo..." className="flex-grow block w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm" />
-                        <input type="text" value={jobSearchCompany} onChange={e => setJobSearchCompany(e.target.value)} placeholder="Buscar por empresa..." className="flex-grow block w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm" />
-                        <Button type="submit" disabled={loading} className="w-full sm:w-auto">{loading ? 'Buscando...' : 'Buscar'}</Button>
-                    </div>
-                )}
-              </form>
-              
-              {searched && (
-                  <div className="mt-4">
-                      {activeTab === 'professionals' && (
-                        <>
-                          <h3 className="font-semibold">{professionalResults.length} profesional(es) encontrado(s)</h3>
-                          {professionalResults.length > 0 ? (
-                              <ul className="divide-y divide-slate-200 dark:divide-slate-700 mt-2">
-                                  {professionalResults.map(prof => (
-                                      <li key={prof.uid} className="py-3 flex justify-between items-center">
-                                          <div>
-                                              <p className="font-semibold flex items-center">{prof.name}{prof.profile.isVerified && <VerifiedBadge />}</p>
-                                              <p className="text-sm text-indigo-500">{prof.profile.specialty}</p>
-                                               <div className="flex items-center mt-1">
-                                                  <StarRating rating={prof.averageRating} readOnly size="sm" />
-                                                  <span className="text-xs text-slate-500 ml-2">({prof.reviewCount} {prof.reviewCount === 1 ? 'opinión' : 'opiniones'})</span>
-                                              </div>
-                                          </div>
-                                          <Button variant="secondary" onClick={() => handleOpenProfileDetailsModal(prof)}>Ver Perfil</Button>
-                                      </li>
-                                  ))}
-                              </ul>
-                          ) : <p className="text-slate-500 dark:text-slate-400 mt-2">No se encontraron profesionales.</p>}
-                        </>
-                      )}
-                      {activeTab === 'jobs' && (
-                         <>
-                          <h3 className="font-semibold">{jobResults.length} empleo(s) encontrado(s)</h3>
-                          {jobResults.length > 0 ? (
-                              <ul className="divide-y divide-slate-200 dark:divide-slate-700 mt-2">
-                                  {jobResults.map(job => {
-                                    const isFull = job.maxApplicants != null && (job.applicantCount || 0) >= job.maxApplicants;
-                                    return (
-                                      <li key={job.id} className="py-3 flex justify-between items-center">
-                                          <div>
-                                              <p className="font-semibold">{job.title}</p>
-                                              <p className="text-sm text-slate-500">Recomendado por: {job.recommenderName}</p>
-                                              <div className="flex items-center mt-1">
-                                                <StarRating rating={job.recommenderAverageRating || 0} readOnly size="sm" />
-                                              </div>
-                                          </div>
-                                          <div className="flex items-center space-x-2">
-                                            {isFull && <span className="text-xs font-semibold text-red-500 bg-red-100 dark:bg-red-900/50 px-2 py-1 rounded-full">Completo</span>}
-                                            <Button variant="secondary" onClick={() => handleOpenJobDetailsModal(job)} disabled={isFull}>
-                                                Ver Detalles
-                                            </Button>
-                                          </div>
-                                      </li>
-                                  )})}
-                              </ul>
-                          ) : <p className="text-slate-500 dark:text-slate-400 mt-2">No se encontraron empleos.</p>}
-                        </>
-                      )}
-                  </div>
-              )}
-            </Card>
-            <Card title="Mis Postulaciones de Empleo" icon={<ClipboardDocumentListIcon />}>
-                {jobApplications.length > 0 ? (
-                    <>
-                        <ul className="divide-y divide-slate-200 dark:divide-slate-700">
-                            {jobAppsPaginated.map(app => (
-                                <li key={app.id} className="py-3 flex justify-between items-center">
-                                    <div>
-                                        <p className="font-semibold">{app.jobTitle} en {app.jobCompany}</p>
-                                        <p className="text-sm text-slate-500 dark:text-slate-400">Postulado el: {app.appliedAt?.toDate().toLocaleDateString()}</p>
+                    {/* Results */}
+                    {searched && !loading && (
+                        <div className="space-y-4">
+                            <h3 className="text-xl font-semibold">{activeTab === 'professionals' ? `${professionalResults.length} ${t('seeker.professionalsFound')}` : `${jobResults.length} ${t('seeker.jobsFound')}`}</h3>
+                            {activeTab === 'professionals' && professionalResults.map(prof => (
+                                <Card key={prof.uid} title="">
+                                    <div className="flex flex-col sm:flex-row gap-4">
+                                        {prof.profile.photoURL && <img src={prof.profile.photoURL} alt={prof.name} className="w-20 h-20 rounded-full object-cover"/>}
+                                        <div className="flex-grow">
+                                            <h4 className="font-bold text-lg flex items-center">{prof.name} {prof.profile.isVerified && <VerifiedBadge />}</h4>
+                                            <p className="text-indigo-500">{prof.profile.specialty}</p>
+                                            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1 line-clamp-2">{prof.profile.bio}</p>
+                                            <div className="flex items-center text-sm text-slate-500"><StarRating rating={prof.averageRating} readOnly/> <span className="ml-2">({prof.reviewCount} {t('recommender.opinions')})</span></div>
+                                            <p className="text-sm text-slate-500">{prof.successfulServices} {t('seeker.successfulServices')}</p>
+                                        </div>
+                                        <div className="flex flex-col sm:items-end gap-2">
+                                            <Button onClick={() => handleOpenContactModal(prof)}>{t('seeker.viewAndContact')}</Button>
+                                        </div>
                                     </div>
-                                    <div>
-                                        {app.recommenderRating ? (
-                                            <div className="flex items-center">
-                                               <StarRating rating={app.recommenderRating} readOnly />
+                                </Card>
+                            ))}
+                            {activeTab === 'jobs' && jobResults.map(job => {
+                                const isFavorite = favoriteJobs.includes(job.id);
+                                const applicants = job.applicantCount || 0;
+                                const maxApplicants = globalMaxApplicants || 0;
+                                const progress = maxApplicants > 0 ? (applicants / maxApplicants) * 100 : 0;
+                                
+                                return (
+                                <Card key={job.id} title="">
+                                    <div className="relative">
+                                        <button 
+                                            onClick={() => handleToggleFavorite(job.id)} 
+                                            className="absolute top-0 right-0 p-2 text-slate-400 hover:text-red-500 transition-colors"
+                                            title={isFavorite ? t('seeker.removeFromFavorites') : t('seeker.addToFavorites')}
+                                        >
+                                            <HeartIcon className="w-6 h-6" solid={isFavorite} />
+                                        </button>
+                                        <h4 className="font-bold text-lg pr-10">{job.title}</h4>
+                                        <p className="text-sm text-slate-500">{job.city} - {jobTypeLabels[job.jobType || 'full_time']}</p>
+                                        <p className="text-sm text-slate-600 dark:text-slate-400 mt-2 line-clamp-2">{job.description}</p>
+                                        
+                                        {globalMaxApplicants !== null && (
+                                            <div className="mt-3">
+                                                <div className="flex justify-between text-xs text-slate-500">
+                                                    <span>{t('seeker.applicants')}</span>
+                                                    <span>{t('seeker.applicantsProgress', { count: applicants, max: maxApplicants })}</span>
+                                                </div>
+                                                <div className="w-full bg-slate-200 dark:bg-slate-700 rounded-full h-1.5 mt-1">
+                                                    <div className="bg-indigo-600 h-1.5 rounded-full" style={{ width: `${progress}%` }}></div>
+                                                </div>
                                             </div>
-                                        ) : (
-                                            <Button size="sm" variant="secondary" onClick={() => handleOpenRecommenderRatingModal(app)}>
-                                                Calificar Recomendador
-                                            </Button>
                                         )}
+
+                                        <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-700 flex justify-between items-center">
+                                            <div>
+                                                <p className="text-xs text-slate-500">{t('seeker.recommendedBy')}</p>
+                                                <div className="flex items-center space-x-2">
+                                                    {job.recommenderPhotoURL && <img src={job.recommenderPhotoURL} alt={job.recommenderName} className="w-8 h-8 rounded-full object-cover" />}
+                                                    <p className="font-semibold">{job.recommenderName}</p>
+                                                    <StarRating rating={job.recommenderAverageRating} readOnly size="sm"/>
+                                                </div>
+                                            </div>
+                                            <Button onClick={() => handleOpenJobDetails(job)}>{t('seeker.viewDetails')}</Button>
+                                        </div>
                                     </div>
-                                </li>
-                            ))}
-                        </ul>
-                        <div className="flex justify-between items-center mt-4">
-                            <span className="text-sm text-slate-600 dark:text-slate-400">Página {jobAppsPage} de {jobAppsTotalPages > 0 ? jobAppsTotalPages : 1}</span>
-                            <div className="space-x-2">
-                                <Button onClick={() => setJobAppsPage(p => p - 1)} disabled={jobAppsPage === 1} size="sm">Anterior</Button>
-                                <Button onClick={() => setJobAppsPage(p => p + 1)} disabled={jobAppsPage === jobAppsTotalPages || jobAppsTotalPages === 0} size="sm">Siguiente</Button>
+                                </Card>
+                            )})}
+                        </div>
+                    )}
+                </div>
+
+                <div className="lg:col-span-1 space-y-6">
+                    <Card title={t('seeker.myProfile')} icon={<UserCircleIcon />}>
+                        <div className="flex items-center space-x-4">
+                             {seekerProfile?.photoURL ? (
+                                <img src={seekerProfile.photoURL} alt={user.name} className="w-20 h-20 rounded-full object-cover border-2 border-white dark:border-slate-700 shadow-sm" />
+                            ) : (
+                                <UserCircleIcon className="w-20 h-20 text-slate-300 dark:text-slate-600" />
+                            )}
+                            <div className="flex-grow">
+                                <h4 className="font-bold text-lg">{user.name}</h4>
+                                <p className="text-sm text-slate-500 truncate">{user.email}</p>
+                                <p className="text-sm text-slate-500">{seekerProfile?.city || t('seeker.notSpecified')}</p>
                             </div>
                         </div>
-                    </>
-                ) : (
-                    <p className="text-slate-500 dark:text-slate-400">Aún no te has postulado a ningún empleo.</p>
-                )}
-            </Card>
-             <Card title="Mis Solicitudes de Servicio" icon={<ClipboardDocumentListIcon />}>
-                {serviceRequests.length > 0 ? (
-                    <>
-                        <ul className="divide-y divide-slate-200 dark:divide-slate-700">
-                            {serviceRequestsPaginated.map(req => (
-                                <li key={req.id} className="py-3 flex justify-between items-center">
-                                    <div>
-                                        <p className="font-semibold">Solicitud a: {req.professionalName}</p>
-                                        <p className="text-sm text-slate-500 dark:text-slate-400">Enviada el: {req.createdAt?.toDate().toLocaleDateString()}</p>
-                                    </div>
-                                    <div>
-                                        {req.professionalRating ? (
-                                            <StarRating rating={req.professionalRating} readOnly />
-                                        ) : req.attendedDate ? (
-                                            <Button size="sm" variant="secondary" onClick={() => handleOpenProfRatingModal(req)}>
-                                                Calificar Profesional
-                                            </Button>
-                                        ) : (
-                                            <span className="text-xs font-semibold text-slate-500 bg-slate-100 dark:bg-slate-700 px-2 py-1 rounded-full">Pendiente</span>
-                                        )}
-                                    </div>
-                                </li>
-                            ))}
-                        </ul>
-                         <div className="flex justify-between items-center mt-4">
-                            <span className="text-sm text-slate-600 dark:text-slate-400">Página {serviceRequestsPage} de {serviceRequestsTotalPages > 0 ? serviceRequestsTotalPages : 1}</span>
-                            <div className="space-x-2">
-                                <Button onClick={() => setServiceRequestsPage(p => p - 1)} disabled={serviceRequestsPage === 1} size="sm">Anterior</Button>
-                                <Button onClick={() => setServiceRequestsPage(p => p + 1)} disabled={serviceRequestsPage === serviceRequestsTotalPages || serviceRequestsTotalPages === 0} size="sm">Siguiente</Button>
+                        <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-700">
+                             <p className="text-sm"><strong>{t('seeker.phoneNumber')}:</strong> {seekerProfile?.phoneNumber || t('seeker.notSpecified')}</p>
+                             <p className="text-sm"><strong>{t('professional.membership')}:</strong> <span className={hasActiveMembership ? 'text-green-500' : 'text-red-500'}>{hasActiveMembership ? t('professional.active') : t('professional.inactive')}</span></p>
+                        </div>
+                        <Button onClick={handleOpenEditModal} className="w-full mt-4">{t('seeker.editProfile')}</Button>
+                    </Card>
+
+                    <Card title={t('seeker.myJobApplications')} icon={<ClipboardDocumentListIcon />}>
+                         <input type="text" placeholder={t('seeker.searchInMyApps')} value={jobAppSearchTerm} onChange={e => setJobAppSearchTerm(e.target.value)} className="w-full px-3 py-2 mb-4 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md" />
+                        {filteredJobApps.length > 0 ? (
+                             <ul className="space-y-4">
+                                {filteredJobApps.slice((jobAppsPage - 1) * ITEMS_PER_PAGE, jobAppsPage * ITEMS_PER_PAGE).map(app => (
+                                    <li key={app.id} className="p-3 bg-slate-100 dark:bg-slate-800 rounded-md">
+                                        <p className="font-bold">{app.jobTitle}</p>
+                                        <p className="text-sm text-slate-500">{app.jobCompany}</p>
+                                        <p className="text-xs text-slate-400">{t('seeker.appliedOn')} {new Date(app.appliedAt).toLocaleDateString()}</p>
+                                        <ApplicationStatusTracker status={app.status}/>
+                                        <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t">
+                                            <Button size="sm" variant="secondary" onClick={() => handleOpenEditApp(app)}><PencilIcon className="w-4 h-4 mr-1"/>{t('edit')}</Button>
+                                            <Button size="sm" variant="danger" onClick={() => handleOpenDeleteApp(app)}><TrashIcon className="w-4 h-4 mr-1"/>{t('seeker.withdraw')}</Button>
+                                            {!app.recommenderRating && <Button size="sm" onClick={() => { setSelectedApplication(app); setIsRecommenderRatingModalOpen(true); }}>{t('seeker.rate')}</Button>}
+                                        </div>
+                                    </li>
+                                ))}
+                            </ul>
+                        ) : <p className="text-slate-500">{t('seeker.noApplicationsYet')}</p>}
+                    </Card>
+
+                     <Card title={t('seeker.myServiceRequests')} icon={<ClipboardDocumentListIcon />}>
+                         <input type="text" placeholder={t('seeker.searchInMyRequests')} value={serviceRequestSearchTerm} onChange={e => setServiceRequestSearchTerm(e.target.value)} className="w-full px-3 py-2 mb-4 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md" />
+                        {filteredServiceRequests.length > 0 ? (
+                             <ul className="space-y-4">
+                                {filteredServiceRequests.slice((serviceRequestsPage - 1) * ITEMS_PER_PAGE, serviceRequestsPage * ITEMS_PER_PAGE).map(req => {
+                                    const statusInfo = getRequestStatusInfo(req);
+                                    return (
+                                        <li key={req.id} className="p-3 bg-slate-100 dark:bg-slate-800 rounded-md">
+                                            <div className="flex justify-between items-start">
+                                                <p className="font-bold">{req.professionalName}</p>
+                                                <span className={`text-xs font-bold uppercase px-2 py-1 rounded-full ${statusInfo.color}`}>{statusInfo.text}</span>
+                                            </div>
+                                            <p className="text-xs text-slate-400">{t('seeker.sentOn')} {new Date(req.createdAt).toLocaleDateString()}</p>
+                                            <p className="text-sm mt-1 font-semibold">{req.requestSubject}</p>
+                                            <p className="text-sm mt-1 italic">"{req.requestDetails}"</p>
+                                            <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t">
+                                                {!req.clientRating && req.attendedDate && <Button size="sm" onClick={() => { setSelectedRequest(req); setIsProfRatingModalOpen(true); }}>{t('seeker.rate')}</Button>}
+                                                {!req.attendedDate && <Button size="sm" variant="secondary" onClick={() => {}}><PencilIcon className="w-4 h-4 mr-1"/>{t('edit')}</Button>}
+                                                {!req.attendedDate && <Button size="sm" variant="danger" onClick={() => {}}><TrashIcon className="w-4 h-4 mr-1"/>{t('seeker.cancelRequest')}</Button>}
+                                            </div>
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+                        ) : <p className="text-slate-500">{t('seeker.noRequestsYet')}</p>}
+                    </Card>
+                </div>
+            </div>
+            {/* --- ALL MODALS --- */}
+            <Modal isOpen={isEditModalOpen} onClose={() => setIsEditModalOpen(false)} title={t('seeker.editMyProfile')}>
+                <form onSubmit={handleSaveProfile} className="space-y-4 max-h-[70vh] overflow-y-auto pr-2">
+                    <div>
+                        <label className="block text-sm font-medium">{t('name')}</label>
+                        <input type="text" value={editName} onChange={e => setEditName(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" required />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium">{t('seeker.profilePhoto')}</label>
+                        <div className="mt-2 flex items-center space-x-4">
+                             {editPhotoPreview ? (
+                                <img src={editPhotoPreview} alt={t('seeker.photoPreview')} className="w-20 h-20 rounded-full object-cover"/>
+                            ) : (
+                                <UserCircleIcon className="w-20 h-20 text-slate-300 dark:text-slate-600" />
+                            )}
+                            <input type="file" accept="image/*" onChange={handlePhotoChange} id="photo-upload" className="hidden"/>
+                            <label htmlFor="photo-upload" className="cursor-pointer bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-800 dark:text-slate-200 font-medium py-2 px-4 rounded-md text-sm">{t('seeker.changePhoto')}</label>
+                        </div>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                            <label className="block text-sm font-medium">{t('seeker.documentType')}</label>
+                            <select value={editDocumentType} onChange={e => setEditDocumentType(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md">
+                                <option value="">{t('seeker.selectIdType')}</option>
+                                <option value="cc">{t('seeker.cc')}</option>
+                                <option value="ce">{t('seeker.ce')}</option>
+                                <option value="passport">{t('seeker.passport')}</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium">{t('seeker.documentNumber')}</label>
+                            <input type="text" value={editDocumentNumber} onChange={e => setEditDocumentNumber(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" />
+                        </div>
+                    </div>
+                     <div>
+                        <label className="block text-sm font-medium">{t('seeker.phoneNumber')}</label>
+                        <input type="tel" value={editPhoneNumber} onChange={e => setEditPhoneNumber(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" />
+                    </div>
+                     <div>
+                        <label className="block text-sm font-medium">{t('seeker.city')}</label>
+                        <input type="text" value={editCity} onChange={e => setEditCity(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" />
+                    </div>
+                     <div>
+                        <label className="block text-sm font-medium">{t('seeker.address')}</label>
+                        <input type="text" value={editAddress} onChange={e => setEditAddress(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" />
+                    </div>
+                     <div>
+                        <label className="block text-sm font-medium">{t('seeker.areaCode')}</label>
+                        <input type="text" value={editAreaCode} onChange={e => setEditAreaCode(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" />
+                    </div>
+                    <div className="flex justify-end pt-4 space-x-2">
+                        <Button type="button" variant="secondary" onClick={() => setIsEditModalOpen(false)}>{t('cancel')}</Button>
+                        <Button type="submit" disabled={isSaving}>{isSaving ? t('saving') : t('saveChanges')}</Button>
+                    </div>
+                </form>
+            </Modal>
+            
+            <Modal isOpen={isJobDetailsModalOpen} onClose={() => setIsJobDetailsModalOpen(false)} title={t('seeker.jobDetails')}>
+                {selectedJob && (() => {
+                    const isUnlocked = hasActiveMembership || unlockedJobs.includes(selectedJob.id);
+                    const hasApplied = jobApplications.some(app => app.jobId === selectedJob.id);
+                    return (
+                    <div className="space-y-4">
+                        <h3 className="text-xl font-bold">{selectedJob.title}</h3>
+                         <p className="text-lg text-slate-600 dark:text-slate-400">{selectedJob.city}</p>
+                         <div className="prose prose-sm dark:prose-invert max-w-none"><p>{selectedJob.description}</p></div>
+                         
+                         <div className="pt-3 border-t border-slate-200 dark:border-slate-700">
+                             <h4 className="font-semibold text-slate-800 dark:text-slate-200">{t('seeker.recommendedBy')}</h4>
+                            <p>{selectedJob.recommenderName}</p>
+                         </div>
+                         
+                         {isUnlocked && (
+                            <div className="pt-3 border-t border-slate-200 dark:border-slate-700">
+                                <h4 className="font-semibold text-slate-800 dark:text-slate-200">{t('seeker.companyContactInfo')}</h4>
+                                <p><strong>{t('seeker.person')}:</strong> {selectedJob.contactPerson || 'N/A'}</p>
+                                <p><strong>{t('seeker.email')}:</strong> {selectedJob.contactEmail || 'N/A'}</p>
+                                <p><strong>{t('seeker.phone')}:</strong> {selectedJob.contactPhone || 'N/A'}</p>
+                            </div>
+                         )}
+
+                         <Button onClick={() => {
+                            if (isUnlocked) {
+                                handleOpenApplicationModal(selectedJob);
+                            } else {
+                                handleOpenPaywall(selectedJob);
+                            }
+                         }} disabled={hasApplied} className="w-full mt-4">
+                            {hasApplied ? t('seeker.alreadyApplied') : (isUnlocked ? t('seeker.proceedToApplication') : t('seeker.unlockAndApply'))}
+                         </Button>
+                    </div>
+                )
+                })()}
+            </Modal>
+
+            <Modal isOpen={isPaywallModalOpen} onClose={() => setIsPaywallModalOpen(false)} title={t('seeker.premiumAccess')}>
+                 <div className="space-y-4">
+                    <p className="text-slate-600 dark:text-slate-400">{t('seeker.premiumAccessDescription')}</p>
+                    <div className="p-4 border rounded-lg space-y-2 cursor-pointer hover:border-indigo-500" onClick={() => handleMembershipPayment(memberships[0])}>
+                         <h4 className="font-bold">{t('seeker.recommendedOption')}: {t('seeker.buyMembership')}</h4>
+                         <p className="text-sm text-slate-500">{t('seeker.membershipBenefit')}</p>
+                    </div>
+                     {selectedJob && (
+                        <div className="p-4 border rounded-lg space-y-2 cursor-pointer hover:border-indigo-500" onClick={() => handleJobUnlockPayment(selectedJob)}>
+                             <h4 className="font-bold">{t('seeker.singlePayment')}</h4>
+                             <p className="text-sm text-slate-500">{t('seeker.singlePaymentDescription')} $1.00</p>
+                        </div>
+                    )}
+                 </div>
+            </Modal>
+            
+            <Modal isOpen={isApplicationModalOpen} onClose={() => setIsApplicationModalOpen(false)} title={`${t('seeker.applyTo')} ${selectedJob?.title}`}>
+                <form onSubmit={handleSubmitApplication} className="space-y-4">
+                    <div>
+                        <label className="block text-sm font-medium">{t('seeker.coverLetterOptional')}</label>
+                        <textarea value={coverLetter} onChange={e => setCoverLetter(e.target.value)} rows={5} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" />
+                    </div>
+                     <div>
+                        <label className="block text-sm font-medium">{t('seeker.attachResume')}</label>
+                        <input type="file" onChange={handleFileChange} className="mt-1 block w-full text-sm" required />
+                    </div>
+                    <div className="space-y-2 pt-4 border-t border-slate-200 dark:border-slate-700">
+                        <label className="flex items-center">
+                            <input type="checkbox" checked={sendToCompany} onChange={e => setSendToCompany(e.target.checked)} className="h-4 w-4 rounded text-indigo-600 focus:ring-indigo-500 border-slate-300" />
+                            <span className="ml-2 text-sm text-slate-700 dark:text-slate-300">{t('seeker.sendToCompany')}</span>
+                        </label>
+                        <label className="flex items-center">
+                            <input type="checkbox" checked={sendToRecommender} onChange={e => setSendToRecommender(e.target.checked)} className="h-4 w-4 rounded text-indigo-600 focus:ring-indigo-500 border-slate-300" />
+                            <span className="ml-2 text-sm text-slate-700 dark:text-slate-300">{t('seeker.sendCopyToRecommender')}</span>
+                        </label>
+                    </div>
+                     {uploadProgress !== null && (
+                        <div>
+                             <label className="block text-sm font-medium">{t('seeker.uploadProgress')}</label>
+                            <div className="w-full bg-slate-200 rounded-full h-2.5 dark:bg-slate-700">
+                                <div className="bg-indigo-600 h-2.5 rounded-full" style={{ width: `${uploadProgress}%` }}></div>
                             </div>
                         </div>
-                    </>
-                ) : (
-                    <p className="text-slate-500 dark:text-slate-400">Aún no has enviado ninguna solicitud de servicio.</p>
+                    )}
+                    <Button type="submit" disabled={isSending || (!sendToCompany && !sendToRecommender)} className="w-full">{isSending ? `${t('seeker.uploading')} ${uploadProgress?.toFixed(0) ?? 0}%` : t('seeker.confirmApplication')}</Button>
+                </form>
+            </Modal>
+            
+            <Modal isOpen={isPaymentModalOpen} onClose={closePaymentModal} title={`${t('payment.payNow')}: ${purchaseDisplay?.name || ''}`}>
+                {paymentClientSecret ? (
+                    <StripeCheckoutForm clientSecret={paymentClientSecret} onSuccess={handlePaymentSuccess} onError={(msg) => setNotification(`${t('seeker.paymentError')} ${msg}`)} />
+                ) : <p>{t('seeker.loadingPaymentGateway')}</p>}
+            </Modal>
+
+             <Modal isOpen={isEditAppModalOpen} onClose={() => setIsEditAppModalOpen(false)} title={t('seeker.editApplication') + ` ${appToEdit?.jobTitle || ''}`}>
+                <form onSubmit={handleUpdateApplication} className="space-y-4">
+                     <div>
+                        <label className="block text-sm font-medium">{t('seeker.coverLetterOptional')}</label>
+                        <textarea value={editCoverLetter} onChange={e => setEditCoverLetter(e.target.value)} rows={5} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium">{t('seeker.updateResume')}</label>
+                        <p className="text-xs text-slate-500 mb-2">{t('seeker.updateResumeDescription')}</p>
+                        <input type="file" onChange={(e) => setEditCvFile(e.target.files ? e.target.files[0] : null)} className="mt-1 block w-full text-sm" />
+                    </div>
+                     {editUploadProgress !== null && (
+                        <div>
+                             <label className="block text-sm font-medium">{t('seeker.uploadProgress')}</label>
+                            <div className="w-full bg-slate-200 rounded-full h-2.5 dark:bg-slate-700">
+                                <div className="bg-indigo-600 h-2.5 rounded-full" style={{ width: `${editUploadProgress}%` }}></div>
+                            </div>
+                        </div>
+                    )}
+                    <div className="flex justify-end space-x-2 pt-2">
+                        <Button type="button" variant="secondary" onClick={() => setIsEditAppModalOpen(false)}>{t('cancel')}</Button>
+                        <Button type="submit" disabled={isSending}>{isSending ? `${t('seeker.uploading')}...` : t('saveChanges')}</Button>
+                    </div>
+                </form>
+            </Modal>
+            <Modal isOpen={isDeleteAppModalOpen} onClose={() => setIsDeleteAppModalOpen(false)} title={t('seeker.withdrawApplication')}>
+                <p>{t('seeker.confirmWithdraw')} "<strong>{appToDelete?.jobTitle}</strong>"?</p>
+                 <p className="text-sm text-slate-500 mt-2">{t('seeker.actionCannotBeUndone')}</p>
+                 <div className="flex justify-end space-x-3 pt-4 mt-2">
+                    <Button variant="secondary" onClick={() => setIsDeleteAppModalOpen(false)}>{t('cancel')}</Button>
+                    <Button variant="danger" onClick={handleConfirmDeleteApp} disabled={isSending}>{isSending ? t('seeker.withdrawing') : t('seeker.yesWithdraw')}</Button>
+                </div>
+            </Modal>
+            <Modal isOpen={isContactModalOpen} onClose={() => setIsContactModalOpen(false)} title={t('seeker.contactAndProfileTitle', {name: selectedProfessional?.name || ''})}>
+                {selectedProfessional && (
+                    <div className="space-y-4 max-h-[80vh] overflow-y-auto pr-2">
+                        {/* Profile Details */}
+                        <div>
+                           <div className="flex flex-col sm:flex-row items-center text-center sm:text-left gap-4 p-4 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
+                                {selectedProfessional.profile.photoURL && <img src={selectedProfessional.profile.photoURL} alt={selectedProfessional.name} className="w-24 h-24 rounded-full object-cover flex-shrink-0"/>}
+                                <div className="flex-grow">
+                                    <h4 className="font-bold text-xl flex items-center justify-center sm:justify-start">{selectedProfessional.name} {selectedProfessional.profile.isVerified && <VerifiedBadge />}</h4>
+                                    <p className="text-indigo-500">{selectedProfessional.profile.specialty}</p>
+                                    <div className="flex items-center justify-center sm:justify-start text-sm text-slate-500"><StarRating rating={selectedProfessional.averageRating} readOnly/> <span className="ml-2">({selectedProfessional.reviewCount} {t('recommender.opinions')})</span></div>
+                                    <p className="text-sm text-slate-500">{selectedProfessional.successfulServices} {t('seeker.successfulServices')}</p>
+                                </div>
+                            </div>
+                            <div className="mt-4 space-y-3">
+                                <div>
+                                    <h5 className="font-semibold">{t('seeker.bio')}</h5>
+                                    <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">{selectedProfessional.profile.bio || t('seeker.noBio')}</p>
+                                </div>
+                                 <div>
+                                    <h5 className="font-semibold">{t('seeker.services')}</h5>
+                                    {selectedProfessional.profile.services?.length > 0 ? (
+                                        <ul className="list-disc list-inside text-sm text-slate-600 dark:text-slate-400 mt-1">
+                                            {selectedProfessional.profile.services.map((s, i) => <li key={i}>{s}</li>)}
+                                        </ul>
+                                    ): <p className="text-sm text-slate-500">{t('seeker.noServicesListed')}</p>}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Contact Form */}
+                        <form onSubmit={handleSendRequest} className="space-y-4 pt-4 border-t border-slate-200 dark:border-slate-700">
+                             <div>
+                                <label className="block text-sm font-medium">{t('seeker.requestSubject')}</label>
+                                <input type="text" value={requestSubject} onChange={e => setRequestSubject(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" required />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium">{t('seeker.describeNeed')}</label>
+                                <textarea value={requestDetails} onChange={e => setRequestDetails(e.target.value)} rows={3} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" />
+                            </div>
+                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium">{t('seeker.serviceDay')}</label>
+                                    <input type="date" value={serviceDate} onChange={e => setServiceDate(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium">{t('seeker.serviceTime')}</label>
+                                    <input type="time" value={serviceTime} onChange={e => setServiceTime(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" />
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium">{t('seeker.locationOptional')}</label>
+                                <div className="flex items-center space-x-2">
+                                    <input type="text" value={requestLocationInput} onChange={e => setRequestLocationInput(e.target.value)} placeholder={t('seeker.locationPlaceholder')} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" />
+                                    <Button type="button" variant="secondary" onClick={handleShareLocation}>{t('seeker.share')}</Button>
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium">{t('seeker.attachPhotoOptional')}</label>
+                                <input type="file" accept="image/*" onChange={(e) => setRequestPhotoFile(e.target.files ? e.target.files[0] : null)} className="mt-1 block w-full text-sm" />
+                            </div>
+                            {requestPhotoUploadProgress !== null && (
+                                <div>
+                                    <label className="block text-sm font-medium">{t('seeker.uploadProgress')}</label>
+                                    <div className="w-full bg-slate-200 rounded-full h-2.5 dark:bg-slate-700">
+                                        <div className="bg-indigo-600 h-2.5 rounded-full" style={{ width: `${requestPhotoUploadProgress}%` }}></div>
+                                    </div>
+                                </div>
+                            )}
+                            <div className="flex justify-end pt-2 space-x-2">
+                                <Button type="button" variant="secondary" onClick={() => setIsContactModalOpen(false)}>{t('cancel')}</Button>
+                                <Button type="submit" disabled={isSending}>{isSending ? (requestPhotoUploadProgress !== null ? `${t('seeker.uploading')} ${requestPhotoUploadProgress.toFixed(0)}%` : t('sending')) : t('seeker.confirmRequest')}</Button>
+                            </div>
+                        </form>
+                    </div>
                 )}
-            </Card>
-          </div>
-          <div className="lg:col-span-1">
-            <Card title="Mi Perfil" icon={<UserCircleIcon />}>
-              <div className="space-y-1 text-slate-600 dark:text-slate-400">
-                  <p><strong>Nombre:</strong> {user.name}</p>
-                  <p><strong>Email:</strong> {user.email}</p>
-                  <p><strong>Teléfono:</strong> {seekerProfile?.phoneNumber || 'No especificado'}</p>
-                  <p><strong>Dirección:</strong> {seekerProfile?.address || 'No especificado'}</p>
-                  <p><strong>Cód. Área:</strong> {seekerProfile?.areaCode || 'No especificado'}</p>
-              </div>
-              <Button className="mt-4 w-full" variant="secondary" onClick={handleOpenEditModal}>Editar Perfil</Button>
-            </Card>
-          </div>
-        </div>
-      </div>
-
-       <Modal isOpen={isProfileDetailsModalOpen} onClose={() => setIsProfileDetailsModalOpen(false)} title="Perfil del Profesional">
-        {selectedProfForDetails && (
-          <div className="space-y-4">
-            <div className="flex items-start space-x-4">
-              {selectedProfForDetails.profile.photoURL ? (
-                <img src={selectedProfForDetails.profile.photoURL} alt={selectedProfForDetails.name} className="w-20 h-20 rounded-full object-cover" />
-              ) : (
-                <UserCircleIcon className="w-20 h-20 text-slate-300" />
-              )}
-              <div>
-                <h3 className="text-xl font-bold flex items-center">{selectedProfForDetails.name} {selectedProfForDetails.profile.isVerified && <VerifiedBadge />}</h3>
-                <p className="text-indigo-500 font-semibold">{selectedProfForDetails.profile.specialty}</p>
-                <div className="flex items-center mt-2">
-                  <StarRating rating={selectedProfForDetails.averageRating} readOnly />
-                  <span className="text-sm text-slate-500 ml-2">({selectedProfForDetails.reviewCount} {selectedProfForDetails.reviewCount === 1 ? 'opinión' : 'opiniones'})</span>
-                </div>
-                <p className="text-sm text-slate-500">{selectedProfForDetails.successfulServices} servicios exitosos</p>
-              </div>
-            </div>
-            <div>
-              <h4 className="font-semibold">Biografía</h4>
-              <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">{selectedProfForDetails.profile.bio || 'Sin biografía.'}</p>
-            </div>
-            <div>
-              <h4 className="font-semibold">Servicios</h4>
-              {selectedProfForDetails.profile.services?.length > 0 ? (
-                <ul className="list-disc list-inside text-sm text-slate-600 dark:text-slate-400 mt-1">
-                  {selectedProfForDetails.profile.services.map((s, i) => <li key={i}>{s}</li>)}
-                </ul>
-              ) : <p className="text-sm text-slate-500 mt-1">No hay servicios listados.</p>}
-            </div>
-            <div className="flex justify-end pt-4">
-              <Button onClick={() => handleOpenRequestModal(selectedProfForDetails)}>Contactar</Button>
-            </div>
-          </div>
-        )}
-      </Modal>
-
-      <Modal isOpen={isRequestModalOpen} onClose={() => setIsRequestModalOpen(false)} title={`Contactar a ${selectedProfessional?.name}`}>
-        <form onSubmit={handleSendRequest} className="space-y-4">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                    <label htmlFor="serviceDate" className="block text-sm font-medium">Día del servicio</label>
-                    <input type="date" id="serviceDate" value={serviceDate} onChange={e => setServiceDate(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md" required />
-                </div>
-                <div>
-                    <label htmlFor="serviceTime" className="block text-sm font-medium">Hora del servicio</label>
-                    <input type="time" id="serviceTime" value={serviceTime} onChange={e => setServiceTime(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md" required />
-                </div>
-            </div>
-            <div>
-                <label htmlFor="requestDetails" className="block text-sm font-medium">Describa su necesidad (opcional)</label>
-                <textarea id="requestDetails" value={requestDetails} onChange={e => setRequestDetails(e.target.value)} rows={4} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md" />
-            </div>
-             <div className="flex justify-end space-x-3 pt-2">
-                <Button type="button" variant="secondary" onClick={() => setIsRequestModalOpen(false)}>Cancelar</Button>
-                <Button type="submit" disabled={isSending}>{isSending ? 'Enviando...' : 'Confirmar Solicitud'}</Button>
-            </div>
-        </form>
-      </Modal>
-
-      <Modal isOpen={isJobDetailsModalOpen} onClose={() => setIsJobDetailsModalOpen(false)} title={selectedJob?.title || 'Detalles del Empleo'}>
-        {selectedJob && (
-          <div className="space-y-4">
-            <div className="prose prose-sm dark:prose-invert max-w-none">
-                <h4 className="font-semibold">Descripción</h4>
-                <p>{selectedJob.description}</p>
-            </div>
-            <div className="pt-2 border-t border-slate-200 dark:border-slate-700">
-                <p className="text-sm text-slate-600 dark:text-slate-400">Recomendado por: {selectedJob.recommenderName}</p>
-            </div>
-            <div className="flex justify-end pt-2">
-                <Button onClick={() => handleApplyClick(selectedJob)}>Desbloquear y Postularse</Button>
-            </div>
-          </div>
-        )}
-      </Modal>
-      
-      <Modal isOpen={isPaywallModalOpen} onClose={() => setIsPaywallModalOpen(false)} title="Acceso Premium">
-        <div className="space-y-4">
-            <p className="text-slate-600 dark:text-slate-400">Para ver los detalles completos de la empresa y postularte, elige una opción:</p>
-            <div className="p-4 border rounded-lg space-y-2">
-                <h4 className="font-semibold">Pago Único por Postulación</h4>
-                <p className="text-sm text-slate-500">Desbloquea esta oferta de empleo por un pago único de $2.00.</p>
-                <Button className="w-full" onClick={() => selectedJob && handleUnlockJobPayment(selectedJob)}>Pagar $2.00</Button>
-            </div>
-            {memberships.length > 0 && (
-                <div className="p-4 border rounded-lg space-y-2">
-                    <h4 className="font-semibold">Comprar Membresía</h4>
-                    <p className="text-sm text-slate-500">Accede a todas las postulaciones de forma ilimitada con una membresía.</p>
-                    {memberships.map(mem => (
-                         <Button key={mem.id} className="w-full" onClick={() => handleMembershipPayment(mem)}>
-                            Comprar {mem.name} por ${mem.price}
-                        </Button>
-                    ))}
-                </div>
-            )}
-        </div>
-      </Modal>
-
-      <Modal isOpen={isApplicationModalOpen} onClose={() => setIsApplicationModalOpen(false)} title={`Postularse a ${selectedJob?.title}`}>
-        {selectedJob && (
-            <form onSubmit={handleSendApplication} className="space-y-4">
-                <div>
-                    <h3 className="font-semibold text-lg">{selectedJob.title}</h3>
-                    <p className="text-indigo-500">{selectedJob.company}</p>
-                    <p className="text-sm text-slate-500 mt-2">{selectedJob.description}</p>
-                </div>
-                <hr className="dark:border-slate-600"/>
-                <div>
-                    <label htmlFor="coverLetter" className="block text-sm font-medium">Carta de Presentación (Opcional)</label>
-                    <textarea id="coverLetter" value={coverLetter} onChange={e => setCoverLetter(e.target.value)} rows={4} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md" />
-                </div>
-                <div>
-                    <label htmlFor="cvFile" className="block text-sm font-medium">Adjuntar Hoja de Vida (CV)</label>
-                    <input type="file" id="cvFile" onChange={e => setCvFile(e.target.files ? e.target.files[0] : null)} className="mt-1 block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" required />
-                </div>
-                <div className="flex justify-end space-x-3 pt-2">
-                    <Button type="button" variant="secondary" onClick={() => setIsApplicationModalOpen(false)}>Cancelar</Button>
-                    <Button type="submit" disabled={isSending}>{isSending ? 'Enviando...' : 'Confirmar Postulación'}</Button>
-                </div>
-            </form>
-        )}
-      </Modal>
-
-      <Modal isOpen={isRecommenderRatingModalOpen} onClose={() => setIsRecommenderRatingModalOpen(false)} title={`Calificar a ${selectedApplication?.recommenderName}`}>
-        <form onSubmit={handleSaveRecommenderRating} className="space-y-4">
-            <p className="text-slate-600 dark:text-slate-400">Su opinión ayuda a otros a tomar mejores decisiones.</p>
-            <div className="flex justify-center">
-                 <StarRating rating={recommenderRating} setRating={setRecommenderRating} />
-            </div>
-            <div className="flex justify-end space-x-3 pt-4">
-                <Button type="button" variant="secondary" onClick={() => setIsRecommenderRatingModalOpen(false)}>Cancelar</Button>
-                <Button type="submit" disabled={isSaving}>{isSaving ? 'Guardando...' : 'Enviar Calificación'}</Button>
-            </div>
-        </form>
-      </Modal>
-
-      <Modal isOpen={isProfRatingModalOpen} onClose={() => setIsProfRatingModalOpen(false)} title={`Calificar a ${selectedRequest?.professionalName}`}>
-          <form onSubmit={handleSaveProfRating} className="space-y-4">
-              <p className="text-slate-600 dark:text-slate-400">Su opinión es importante para construir una comunidad de confianza.</p>
-              <div className="flex justify-center">
-                  <StarRating rating={professionalRating} setRating={setProfessionalRating} />
-              </div>
-              <div className="flex justify-end space-x-3 pt-4">
-                  <Button type="button" variant="secondary" onClick={() => setIsProfRatingModalOpen(false)}>Cancelar</Button>
-                  <Button type="submit" disabled={isSaving}>{isSaving ? 'Enviar Calificación' : 'Guardar Calificación'}</Button>
-              </div>
-          </form>
-      </Modal>
-      
-      <Modal isOpen={isPaymentModalOpen} onClose={closePaymentModal} title={`Realizar Pago: ${purchaseDisplay?.name || ''}`}>
-            {paymentClientSecret && stripe ? (
-                <StripeCheckoutForm stripe={stripe} clientSecret={paymentClientSecret} onSuccess={handlePaymentSuccess} onError={(msg) => setNotification(`Error de pago: ${msg}`)} />
-            ) : <p>Cargando pasarela de pago...</p>}
-      </Modal>
-
-      <Modal isOpen={isEditModalOpen} onClose={() => setIsEditModalOpen(false)} title="Editar mi Perfil">
-        <form onSubmit={handleSaveProfile} className="space-y-4">
-            <div>
-                <label htmlFor="editName" className="block text-sm font-medium">Nombre</label>
-                <input type="text" id="editName" value={editName} onChange={e => setEditName(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md" required />
-            </div>
-             <div>
-                <label htmlFor="editPhoneNumber" className="block text-sm font-medium">Número de Teléfono</label>
-                <input type="tel" id="editPhoneNumber" value={editPhoneNumber} onChange={e => setEditPhoneNumber(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md" />
-            </div>
-            <div>
-                <label htmlFor="editAddress" className="block text-sm font-medium">Dirección</label>
-                <input type="text" id="editAddress" value={editAddress} onChange={e => setEditAddress(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md" />
-                 <Button type="button" variant="secondary" size="sm" className="mt-2" onClick={handleShareLocation}>Compartir Ubicación Actual</Button>
-            </div>
-             <div>
-                <label htmlFor="editAreaCode" className="block text-sm font-medium">Código de Área</label>
-                <input type="text" id="editAreaCode" value={editAreaCode} onChange={e => setEditAreaCode(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md" />
-            </div>
-             <div className="flex justify-end space-x-3 pt-4">
-                <Button type="button" variant="secondary" onClick={() => setIsEditModalOpen(false)}>Cancelar</Button>
-                <Button type="submit" disabled={isSaving}>{isSaving ? 'Guardando...' : 'Guardar Cambios'}</Button>
-            </div>
-        </form>
-      </Modal>
-    </>
-  );
+            </Modal>
+            <Modal isOpen={isRecommenderRatingModalOpen} onClose={() => setIsRecommenderRatingModalOpen(false)} title={`${t('seeker.rateRecommender')} ${selectedApplication?.recommenderName}`}>
+                <form onSubmit={handleRateRecommender} className="space-y-4">
+                    <p className="text-slate-500">{t('seeker.opinionHelps')}</p>
+                    <div className="flex justify-center py-4">
+                        <StarRating rating={recommenderRating} setRating={setRecommenderRating} size="lg" />
+                    </div>
+                    <div className="flex justify-end pt-2 space-x-2">
+                        <Button type="button" variant="secondary" onClick={() => setIsRecommenderRatingModalOpen(false)}>{t('cancel')}</Button>
+                        <Button type="submit" disabled={isSending || recommenderRating === 0}>{isSending ? t('saving') : t('seeker.sendRating')}</Button>
+                    </div>
+                </form>
+            </Modal>
+            <Modal isOpen={isProfRatingModalOpen} onClose={() => setIsProfRatingModalOpen(false)} title={`${t('seeker.rateProfessional')} ${selectedRequest?.professionalName}`}>
+                <form onSubmit={handleRateProfessional} className="space-y-4">
+                    <p className="text-slate-500">{t('seeker.opinionCommunity')}</p>
+                    <div className="flex justify-center py-4">
+                        <StarRating rating={professionalRating} setRating={setProfessionalRating} size="lg" />
+                    </div>
+                    <div className="flex justify-end pt-2 space-x-2">
+                        <Button type="button" variant="secondary" onClick={() => setIsProfRatingModalOpen(false)}>{t('cancel')}</Button>
+                        <Button type="submit" disabled={isSending || professionalRating === 0}>{isSending ? t('saving') : t('seeker.sendRating')}</Button>
+                    </div>
+                </form>
+            </Modal>
+        </>
+    );
 }
-
-export default SeekerDashboard;

@@ -1,4 +1,5 @@
 import React from 'react';
+import { useLanguage } from '../../contexts/LanguageContext';
 
 interface ToastProps {
   message: string | null;
@@ -13,6 +14,7 @@ const CheckCircleIcon: React.FC<{ className?: string }> = ({ className }) => (
 
 
 const Toast: React.FC<ToastProps> = ({ message, onClose }) => {
+  const { t } = useLanguage();
   if (!message) return null;
 
   return (
@@ -24,7 +26,7 @@ const Toast: React.FC<ToastProps> = ({ message, onClose }) => {
               <CheckCircleIcon className="h-6 w-6 text-green-400" aria-hidden="true" />
             </div>
             <div className="ml-3 w-0 flex-1 pt-0.5">
-              <p className="text-sm font-medium text-slate-900 dark:text-white">Notificación</p>
+              <p className="text-sm font-medium text-slate-900 dark:text-white">{t('notification') || 'Notification'}</p>
               <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{message}</p>
             </div>
             <div className="ml-4 flex-shrink-0 flex">

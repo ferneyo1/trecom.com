@@ -1,22 +1,10 @@
 {
-  "name": "perfilpro-connect",
+  "name": "terecomiendo",
+  "description": "An application to connect seekers, recommenders, and professionals, with dedicated dashboards for each user type.",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
-  },
-  "dependencies": {
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
-    "firebase": "^12.5.0"
-  },
-  "devDependencies": {
-    "@types/node": "^22.14.0",
-    "@vitejs/plugin-react": "^5.0.0",
-    "typescript": "~5.8.2",
-    "vite": "^6.2.0"
+  "engines": {
+    "node": ">=20.0.0"
   }
 }

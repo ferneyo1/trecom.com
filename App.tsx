@@ -2,13 +2,16 @@ import React, { useState, useEffect } from 'react';
 import { User, UserRole } from './types';
 import Login from './components/Login';
 import Dashboard from './components/Dashboard';
+import PublicJobView from './components/PublicJobView'; // Import the new component
 import { auth, db } from './firebase';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { doc, setDoc, onSnapshot } from 'firebase/firestore';
+import { LanguageProvider, useLanguage } from './contexts/LanguageContext';
 
-function App() {
+function MainApp() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const { t } = useLanguage();
 
   useEffect(() => {
     let unsubscribeProfile: () => void = () => {};
@@ -72,7 +75,7 @@ function App() {
   if (loading) {
     return (
         <div className="flex items-center justify-center min-h-screen">
-            <div className="text-xl font-semibold">Cargando...</div>
+            <div className="text-xl font-semibold">{t('loading')}</div>
         </div>
     );
   }
@@ -86,6 +89,27 @@ function App() {
         <Login />
       )}
     </div>
+  );
+}
+
+function AppContent() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const view = urlParams.get('view');
+    const id = urlParams.get('id');
+  
+    if (view === 'job' && id) {
+      return <PublicJobView jobId={id} />;
+    }
+  
+    return <MainApp />;
+}
+
+
+function App() {
+  return (
+    <LanguageProvider>
+      <AppContent />
+    </LanguageProvider>
   );
 }
 

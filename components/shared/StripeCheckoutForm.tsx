@@ -1,16 +1,17 @@
 import React, { useState } from 'react';
 import { Button } from './Button';
+import { useLanguage } from '../../contexts/LanguageContext';
 
 interface StripeCheckoutFormProps {
     // These props are kept for API compatibility, but are not used in this simulation.
     clientSecret: string;
     onSuccess: () => void;
     onError: (message: string) => void;
-    stripe: any; 
 }
 
 // A robust simulation of a Stripe payment form that does not crash.
 const StripeCheckoutForm: React.FC<StripeCheckoutFormProps> = ({ onSuccess, onError }) => {
+    const { t } = useLanguage();
     const [isProcessing, setIsProcessing] = useState(false);
     const [errorMessage, setErrorMessage] = useState('');
     const [cardDetails, setCardDetails] = useState({
@@ -31,7 +32,7 @@ const StripeCheckoutForm: React.FC<StripeCheckoutFormProps> = ({ onSuccess, onEr
 
         // Basic validation for simulation
         if (!cardDetails.cardNumber || !cardDetails.expiry || !cardDetails.cvc) {
-            const errorMsg = 'Por favor, complete todos los campos de la tarjeta.';
+            const errorMsg = t('payment.error.fillAllFields') || 'Por favor, complete todos los campos de la tarjeta.';
             setErrorMessage(errorMsg);
             onError(errorMsg);
             setIsProcessing(false);
@@ -50,7 +51,7 @@ const StripeCheckoutForm: React.FC<StripeCheckoutFormProps> = ({ onSuccess, onEr
     return (
         <form id="payment-form" onSubmit={handleSubmit} className="space-y-4">
             <div>
-                <label htmlFor="cardNumber" className="block text-sm font-medium text-slate-700 dark:text-slate-300">Número de Tarjeta</label>
+                <label htmlFor="cardNumber" className="block text-sm font-medium text-slate-700 dark:text-slate-300">{t('payment.cardNumber') || 'Número de Tarjeta'}</label>
                 <input 
                     type="text" 
                     id="cardNumber" 
@@ -64,7 +65,7 @@ const StripeCheckoutForm: React.FC<StripeCheckoutFormProps> = ({ onSuccess, onEr
             </div>
             <div className="grid grid-cols-2 gap-4">
                 <div>
-                    <label htmlFor="expiry" className="block text-sm font-medium text-slate-700 dark:text-slate-300">Vencimiento (MM/AA)</label>
+                    <label htmlFor="expiry" className="block text-sm font-medium text-slate-700 dark:text-slate-300">{t('payment.expiry') || 'Vencimiento (MM/AA)'}</label>
                     <input 
                         type="text" 
                         id="expiry" 
@@ -93,7 +94,7 @@ const StripeCheckoutForm: React.FC<StripeCheckoutFormProps> = ({ onSuccess, onEr
 
             <Button disabled={isProcessing} type="submit" className="w-full">
                 <span id="button-text">
-                    {isProcessing ? "Procesando..." : "Pagar ahora"}
+                    {isProcessing ? (t('payment.processing') || 'Procesando...') : (t('payment.payNow') || 'Pagar ahora')}
                 </span>
             </Button>
             {errorMessage && <div id="payment-message" className="text-red-500 text-sm mt-2 text-center">{errorMessage}</div>}

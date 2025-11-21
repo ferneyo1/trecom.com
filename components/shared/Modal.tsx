@@ -1,14 +1,18 @@
 import React from 'react';
 import { Button } from './Button';
+import { useLanguage } from '../../contexts/LanguageContext';
 
 interface ModalProps {
   isOpen: boolean;
   onClose: () => void;
   title: string;
-  children: React.ReactNode;
+  // Fix: Made the `children` prop optional to resolve multiple TypeScript errors
+  // where it was not being detected when passed via JSX.
+  children?: React.ReactNode;
 }
 
 export function Modal({ isOpen, onClose, title, children }: ModalProps) {
+  const { t } = useLanguage();
   if (!isOpen) return null;
 
   return (
@@ -28,7 +32,7 @@ export function Modal({ isOpen, onClose, title, children }: ModalProps) {
           <button 
             onClick={onClose} 
             className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
-            aria-label="Cerrar modal"
+            aria-label={t('close')}
           >
             <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
           </button>
