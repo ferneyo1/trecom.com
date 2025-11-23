@@ -27,9 +27,13 @@ function Dashboard({ user, onLogout }: DashboardProps) {
     setAdminView(view);
   };
 
+  const handleNavigateToDashboard = () => {
+    setCurrentView('dashboard');
+  };
+
   const renderDashboard = () => {
     if (currentView === 'settings') {
-      return <SettingsDashboard onBackToDashboard={() => setCurrentView('dashboard')} />;
+      return <SettingsDashboard user={user} onBackToDashboard={() => setCurrentView('dashboard')} onLogout={onLogout} />;
     }
     if (currentView === 'help') {
         return <HelpDashboard user={user} onBackToDashboard={() => setCurrentView('dashboard')} />;
@@ -57,6 +61,8 @@ function Dashboard({ user, onLogout }: DashboardProps) {
         onNavigateToSettings={() => setCurrentView('settings')}
         onNavigateToHelp={() => setCurrentView('help')}
         onAdminNavigate={handleAdminNavigate}
+        currentView={currentView}
+        onNavigateToDashboard={handleNavigateToDashboard}
       />
       <main className="flex-grow overflow-auto p-4 sm:p-6 lg:p-8">
         {renderDashboard()}

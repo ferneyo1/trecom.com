@@ -1,5 +1,5 @@
 import React from 'react';
-import { User } from '../../types';
+import { User, UserRole } from '../../types';
 import { useLanguage } from '../../contexts/LanguageContext';
 import { Card } from '../shared/Card';
 import { Button } from '../shared/Button';
@@ -11,7 +11,23 @@ interface HelpDashboardProps {
 
 const HelpDashboard: React.FC<HelpDashboardProps> = ({ user, onBackToDashboard }) => {
   const { t } = useLanguage();
-  const roleKey = user.role.toLowerCase() as 'seeker' | 'professional' | 'recommender';
+  
+  let roleKey: 'seeker' | 'professional' | 'recommender';
+
+  switch (user.role) {
+    case UserRole.SEEKER:
+      roleKey = 'seeker';
+      break;
+    case UserRole.PROFESSIONAL:
+      roleKey = 'professional';
+      break;
+    case UserRole.RECOMMENDER:
+      roleKey = 'recommender';
+      break;
+    default:
+      // Fallback for admin or other roles
+      roleKey = 'seeker';
+  }
   
   // A helper to safely get nested translation values.
   const getTranslationObject = (key: string) => {

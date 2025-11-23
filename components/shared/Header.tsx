@@ -10,6 +10,8 @@ interface HeaderProps {
   onNavigateToSettings: () => void;
   onNavigateToHelp: () => void;
   onAdminNavigate?: (view: AdminView) => void;
+  currentView: 'dashboard' | 'settings' | 'help';
+  onNavigateToDashboard: () => void;
 }
 
 const UserCircleIcon: React.FC<{ className?: string }> = ({ className }) => (
@@ -28,9 +30,15 @@ const QuestionMarkCircleIcon: React.FC<{ className?: string }> = ({ className })
 const ArrowRightOnRectangleIcon: React.FC<{ className?: string }> = ({ className }) => (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className={className}><path fillRule="evenodd" d="M7.5 3.75A1.5 1.5 0 006 5.25v13.5a1.5 1.5 0 001.5 1.5h6a1.5 1.5 0 001.5-1.5V15a.75.75 0 011.5 0v3.75a3 3 0 01-3 3h-6a3 3 0 01-3-3V5.25a3 3 0 013-3h6a3 3 0 013 3V9A.75.75 0 0115 9V5.25a1.5 1.5 0 00-1.5-1.5h-6zm10.72 4.72a.75.75 0 011.06 0l3 3a.75.75 0 010 1.06l-3 3a.75.75 0 11-1.06-1.06l1.72-1.72H9a.75.75 0 010-1.5h10.94l-1.72-1.72a.75.75 0 010-1.06z" clipRule="evenodd" /></svg>
 );
+const HomeIcon: React.FC<{ className?: string }> = ({ className }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className={className}>
+      <path d="M11.47 3.84a.75.75 0 011.06 0l8.69 8.69a.75.75 0 101.06-1.06l-8.689-8.69a2.25 2.25 0 00-3.182 0l-8.69 8.69a.75.75 0 001.061 1.06l8.69-8.69z" />
+      <path d="M12 5.432l8.159 8.159c.03.03.06.058.091.086v6.198c0 1.035-.84 1.875-1.875 1.875H15a.75.75 0 01-.75-.75v-4.5a.75.75 0 00-.75-.75h-3a.75.75 0 00-.75.75v4.5A.75.75 0 019 19.5H5.625c-1.036 0-1.875-.84-1.875-1.875v-6.198a2.29 2.29 0 00.091-.086L12 5.43z" />
+    </svg>
+);
 
 
-const Header: React.FC<HeaderProps> = ({ user, onLogout, onNavigateToSettings, onNavigateToHelp, onAdminNavigate }) => {
+const Header: React.FC<HeaderProps> = ({ user, onLogout, onNavigateToSettings, onNavigateToHelp, onAdminNavigate, currentView, onNavigateToDashboard }) => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const { t } = useLanguage();
@@ -80,6 +88,15 @@ const Header: React.FC<HeaderProps> = ({ user, onLogout, onNavigateToSettings, o
                     <p className="font-semibold">{user.name}</p>
                     <p className="truncate">{user.email}</p>
                   </div>
+                  {currentView !== 'dashboard' && (
+                    <>
+                      <button onClick={() => { onNavigateToDashboard(); setIsMenuOpen(false); }} className="w-full text-left flex items-center px-4 py-2 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-600" role="menuitem">
+                        <HomeIcon className="h-5 w-5 mr-3" />
+                        {t('settings.backToDashboard')}
+                      </button>
+                      <div className="border-t border-slate-200 dark:border-slate-600 my-1"></div>
+                    </>
+                  )}
                   {user.role === UserRole.ADMIN && (
                     <>
                     {adminMenuItems.map(item => (
@@ -92,7 +109,7 @@ const Header: React.FC<HeaderProps> = ({ user, onLogout, onNavigateToSettings, o
                   )}
                   <button onClick={() => { onNavigateToSettings(); setIsMenuOpen(false); }} className="w-full text-left flex items-center px-4 py-2 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-600" role="menuitem">
                     <Cog6ToothIcon className="h-5 w-5 mr-3" />
-                    {t('settings')}
+                    {t('settings.title')}
                   </button>
                   <button onClick={() => { onNavigateToHelp(); setIsMenuOpen(false); }} className="w-full text-left flex items-center px-4 py-2 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-600" role="menuitem">
                     <QuestionMarkCircleIcon className="h-5 w-5 mr-3" />

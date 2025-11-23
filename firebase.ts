@@ -9,7 +9,7 @@ const firebaseConfig = {
 apiKey: "AIzaSyAe7wGw0L6A7qa2emoUC9GfefvEJ4bsph8",
   authDomain: "trecomiendo-91b8e.firebaseapp.com",
   projectId: "trecomiendo-91b8e",
-  storageBucket: "gs://trecomiendo-91b8e.firebasestorage.app",
+  storageBucket: "trecomiendo-91b8e.firebasestorage.app",
   messagingSenderId: "1007801307346",
   appId: "1:1007801307346:web:8ab34d8deb7886e2549d0b",
   measurementId: "G-9QYTE7JGRH"

@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { User, ProfessionalProfile, UserRole, Membership, ServiceRequest, Job, RecommenderPayoutSettings, Earning, Payment, JobApplication } from '../../types';
+import { User, ProfessionalProfile, UserRole, Membership, ServiceRequest, Job, RecommenderPayoutSettings, Earning, Payment, JobApplication, ApplicationStatus } from '../../types';
 import { Card } from '../shared/Card';
 import { Button } from '../shared/Button';
 import { db, storage } from '../../firebase';
 import { Modal } from '../shared/Modal';
-import { collection, onSnapshot, query, where, getDoc, updateDoc, deleteDoc, addDoc, doc, writeBatch, getDocs, setDoc, serverTimestamp, Timestamp, runTransaction } from 'firebase/firestore';
+import { collection, onSnapshot, query, where, getDoc, updateDoc, deleteDoc, addDoc, doc, writeBatch, getDocs, setDoc, serverTimestamp, Timestamp, runTransaction, increment } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { useLanguage } from '../../contexts/LanguageContext';
 
@@ -15,6 +15,7 @@ interface AdminDashboardProps {
 
 interface UserDocument extends User {
     id: string;
+    isDisabled?: boolean;
 }
 
 interface ProfessionalDocument extends ProfessionalProfile {
@@ -77,19 +78,30 @@ export function AdminDashboard({ user, currentView }: AdminDashboardProps) {
     const [memberships, setMemberships] = useState<Membership[]>([]);
     const [payoutSettings, setPayoutSettings] = useState<Partial<RecommenderPayoutSettings>>({});
     const [globalMaxApplicants, setGlobalMaxApplicants] = useState<number | ''>('');
-    const [pendingApplications, setPendingApplications] = useState<JobApplication[]>([]);
+    const [allApplications, setAllApplications] = useState<JobApplication[]>([]);
     const [pendingPayouts, setPendingPayouts] = useState<{[key: string]: RecommenderPayoutInfo}>({});
 
     // Modals and Forms State
-    const [userToEdit, setUserToEdit] = useState<UserDocument | null>(null);
-    const [isEditUserModalOpen, setIsEditUserModalOpen] = useState(false);
-    const [editUserForm, setEditUserForm] = useState<Partial<UserDocument>>({});
+    const [userToModify, setUserToModify] = useState<UserDocument | null>(null);
+    const [isDeactivateUserModalOpen, setIsDeactivateUserModalOpen] = useState(false);
+    const [isDeleteUserModalOpen, setIsDeleteUserModalOpen] = useState(false);
     
     // New Modals State
     const [isProfileDetailModalOpen, setIsProfileDetailModalOpen] = useState(false);
     const [profileForDetails, setProfileForDetails] = useState<ProfessionalDocument | null>(null);
     const [isJobDetailModalOpen, setIsJobDetailModalOpen] = useState(false);
     const [jobForDetails, setJobForDetails] = useState<Job | null>(null);
+
+    // Application Management State
+    const [appSearchTerm, setAppSearchTerm] = useState('');
+    const [filteredApps, setFilteredApps] = useState<JobApplication[]>([]);
+    const [appCurrentPage, setAppCurrentPage] = useState(1);
+    const APPS_PER_PAGE = 10;
+    const [isUpdateAppModalOpen, setIsUpdateAppModalOpen] = useState(false);
+    const [appToUpdate, setAppToUpdate] = useState<JobApplication | null>(null);
+    const [newAppStatus, setNewAppStatus] = useState<ApplicationStatus>('submitted');
+    const [isSaving, setIsSaving] = useState(false);
+
 
     // Test Email State
     const [testEmail, setTestEmail] = useState('');
@@ -172,11 +184,12 @@ export function AdminDashboard({ user, currentView }: AdminDashboardProps) {
             }
         });
 
-        // Fetch applications pending hire
-        const appsQuery = query(collection(db, 'jobApplications'), where('status', '==', 'applied'));
+        // Fetch ALL applications for management
+        const appsQuery = query(collection(db, 'jobApplications'));
         const unsubscribeApps = onSnapshot(appsQuery, (snapshot) => {
             const appsData = snapshot.docs.map(appDoc => ({ id: appDoc.id, ...sanitizeData(appDoc.data()) } as JobApplication));
-            setPendingApplications(appsData);
+            appsData.sort((a,b) => (new Date(b.appliedAt).getTime() || 0) - (new Date(a.appliedAt).getTime() || 0));
+            setAllApplications(appsData);
         });
 
         // Fetch pending earnings
@@ -212,6 +225,15 @@ export function AdminDashboard({ user, currentView }: AdminDashboardProps) {
             unsubscribeEarnings();
         };
     }, []);
+
+    useEffect(() => {
+      const filtered = allApplications.filter(app => 
+        app.seekerName?.toLowerCase().includes(appSearchTerm.toLowerCase()) ||
+        app.jobTitle?.toLowerCase().includes(appSearchTerm.toLowerCase()) ||
+        app.jobCompany?.toLowerCase().includes(appSearchTerm.toLowerCase())
+      );
+      setFilteredApps(filtered);
+    }, [allApplications, appSearchTerm]);
 
     // Real-time listener for test email status
     useEffect(() => {
@@ -290,23 +312,41 @@ export function AdminDashboard({ user, currentView }: AdminDashboardProps) {
         await setDoc(settingsRef, { maxApplicantsGlobal: globalMaxApplicants === '' ? null : Number(globalMaxApplicants) }, { merge: true });
     };
 
-    const handleOpenEditUser = (userDoc: UserDocument) => {
-        setUserToEdit(userDoc);
-        setEditUserForm({ ...userDoc });
-        setIsEditUserModalOpen(true);
+    const handleToggleUserDisabled = async () => {
+        if (!userToModify) return;
+        const userRef = doc(db, 'users', userToModify.id);
+        await updateDoc(userRef, { isDisabled: !userToModify.isDisabled });
+        setIsDeactivateUserModalOpen(false);
+    };
+    
+    const handleDeleteUser = async () => {
+        if (!userToModify) return;
+    
+        const roleCollectionMap: { [key in UserRole]?: string } = {
+            [UserRole.SEEKER]: 'seekers',
+            [UserRole.RECOMMENDER]: 'recommenders',
+            [UserRole.PROFESSIONAL]: 'professionals',
+        };
+    
+        try {
+            const batch = writeBatch(db);
+            // Delete main user doc
+            batch.delete(doc(db, 'users', userToModify.id));
+    
+            // Delete role-specific doc if it exists
+            const collectionName = roleCollectionMap[userToModify.role];
+            if (collectionName) {
+                batch.delete(doc(db, collectionName, userToModify.id));
+            }
+    
+            await batch.commit();
+        } catch (error) {
+            console.error("Error deleting user:", error);
+        } finally {
+            setIsDeleteUserModalOpen(false);
+        }
     };
 
-    const handleUpdateUser = async (e: React.FormEvent) => {
-        e.preventDefault();
-        if (!userToEdit) return;
-        const userRef = doc(db, 'users', userToEdit.id);
-        await updateDoc(userRef, {
-            name: editUserForm.name,
-            role: editUserForm.role,
-            isVerified: editUserForm.isVerified
-        });
-        setIsEditUserModalOpen(false);
-    };
 
     const handleSendTestEmail = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -329,53 +369,63 @@ export function AdminDashboard({ user, currentView }: AdminDashboardProps) {
         }
     };
 
-    const handleMarkAsHired = async (application: JobApplication) => {
-        if (!payoutSettings.perConfirmedHire || payoutSettings.perConfirmedHire <= 0) {
-            console.warn("Payout for confirmed hire is not set or is zero.");
-            return;
-        }
+    const handleOpenUpdateAppModal = (app: JobApplication) => {
+      setAppToUpdate(app);
+      setNewAppStatus(app.status);
+      setIsUpdateAppModalOpen(true);
+    };
 
-        try {
+    const handleUpdateAppStatus = async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (!appToUpdate) return;
+      setIsSaving(true);
+      
+      try {
+        if (newAppStatus === 'hired') {
             await runTransaction(db, async (transaction) => {
-                const appRef = doc(db, 'jobApplications', application.id);
-                
-                // 1. Update application status
+                const appRef = doc(db, 'jobApplications', appToUpdate.id);
                 transaction.update(appRef, { status: 'hired' });
     
-                // 2. Create new earning
-                const earningRef = doc(collection(db, 'earnings'));
-                transaction.set(earningRef, {
-                    recommenderId: application.recommenderId,
-                    amount: payoutSettings.perConfirmedHire,
-                    type: 'confirmedHire',
-                    status: 'pending',
-                    createdAt: serverTimestamp(),
-                    jobId: application.jobId,
-                    jobTitle: application.jobTitle,
-                    applicationId: application.id,
-                });
+                if (payoutSettings.perConfirmedHire && payoutSettings.perConfirmedHire > 0) {
+                    const earningRef = doc(collection(db, 'earnings'));
+                    transaction.set(earningRef, {
+                        recommenderId: appToUpdate.recommenderId,
+                        amount: payoutSettings.perConfirmedHire,
+                        type: 'confirmedHire',
+                        status: 'pending',
+                        createdAt: serverTimestamp(),
+                        jobId: appToUpdate.jobId,
+                        jobTitle: appToUpdate.jobTitle,
+                        applicationId: appToUpdate.id,
+                    });
+                }
             });
     
-            // 3. Send email notification
-            const recommenderDoc = await getDoc(doc(db, 'users', application.recommenderId));
+            const recommenderDoc = await getDoc(doc(db, 'users', appToUpdate.recommenderId));
             if (recommenderDoc.exists() && recommenderDoc.data().email) {
                 await addDoc(collection(db, "mail"), {
                     to: [recommenderDoc.data().email],
                     message: {
                         subject: t('emails.recommender.hireConfirmedSubject'),
-                        // FIX: Use `t` function with replacements object instead of chained .replace() calls.
                         html: t('emails.recommender.hireConfirmedBody', {
-                            name: application.recommenderName || 'Recomendador',
-                            seekerName: application.seekerName || 'Candidato',
-                            jobTitle: application.jobTitle || 'un empleo',
+                            name: appToUpdate.recommenderName || 'Recommender',
+                            seekerName: appToUpdate.seekerName || 'Candidate',
+                            jobTitle: appToUpdate.jobTitle || 'a job',
                             amount: payoutSettings.perConfirmedHire
                         }),
                     },
                 });
             }
-        } catch (error) {
-            console.error("Error marking as hired:", error);
+        } else {
+            const appRef = doc(db, 'jobApplications', appToUpdate.id);
+            await updateDoc(appRef, { status: newAppStatus });
         }
+        setIsUpdateAppModalOpen(false);
+      } catch (error) {
+          console.error("Error updating application status:", error);
+      } finally {
+          setIsSaving(false);
+      }
     };
     
     const renderVerifications = () => (
@@ -425,18 +475,72 @@ export function AdminDashboard({ user, currentView }: AdminDashboardProps) {
         </div>
     );
     
-    const renderHiring = () => (
+    const renderHiring = () => {
+      const totalPages = Math.ceil(filteredApps.length / APPS_PER_PAGE);
+      const currentApps = filteredApps.slice((appCurrentPage - 1) * APPS_PER_PAGE, appCurrentPage * APPS_PER_PAGE);
+      const statusLabels: { [key in ApplicationStatus]: string } = {
+        submitted: t('seeker.applicationStatus.submitted'),
+        recommender_rejected: t('seeker.applicationStatus.recommender_rejected'),
+        forwarded_to_company: t('seeker.applicationStatus.forwarded_to_company'),
+        under_review: t('seeker.applicationStatus.under_review'),
+        interviewing: t('seeker.applicationStatus.interviewing'),
+        company_rejected: t('seeker.applicationStatus.company_rejected'),
+        hired: t('seeker.applicationStatus.hired'),
+      };
+
+      return (
          <div className="space-y-6">
             <Card title={t('admin.management.manageApplications')}>
-                 {pendingApplications.length > 0 ? pendingApplications.map(app => (
-                    <div key={app.id} className="flex justify-between items-center py-2 border-b dark:border-slate-700">
-                        <div>
-                            <p className="font-medium">{app.seekerName || 'N/A'}</p>
-                            <p className="text-sm text-slate-500">para {app.jobTitle || 'N/A'}</p>
-                        </div>
-                        <Button size="sm" variant="secondary" onClick={() => handleMarkAsHired(app)}>{t('admin.management.markAsHired')}</Button>
-                    </div>
-                 )) : <p className="text-slate-500">{t('admin.management.noPendingHires')}</p>}
+              <div className="mb-4">
+                <input
+                  type="text"
+                  placeholder={t('admin.management.searchPlaceholder')}
+                  value={appSearchTerm}
+                  onChange={e => setAppSearchTerm(e.target.value)}
+                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md"
+                />
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-slate-50 dark:bg-slate-800">
+                    <tr>
+                      <th className="p-2">{t('admin.management.tableHeaderCandidate')}</th>
+                      <th className="p-2">{t('admin.management.tableHeaderJob')}</th>
+                      <th className="p-2">{t('admin.management.tableHeaderRecommender')}</th>
+                      <th className="p-2">{t('admin.management.tableHeaderStatus')}</th>
+                      <th className="p-2">{t('admin.management.tableHeaderActions')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {currentApps.map(app => (
+                      <tr key={app.id} className="border-b dark:border-slate-700">
+                        <td className="p-2 font-medium">{app.seekerName}</td>
+                        <td className="p-2">{app.jobTitle} at {app.jobCompany}</td>
+                        <td className="p-2">{app.recommenderName}</td>
+                        <td className="p-2">
+                          <span className="px-2 py-1 text-xs font-semibold rounded-full bg-slate-200 text-slate-800 dark:bg-slate-700 dark:text-slate-300">
+                            {statusLabels[app.status] || app.status}
+                          </span>
+                        </td>
+                        <td className="p-2">
+                          <Button size="sm" variant="secondary" onClick={() => handleOpenUpdateAppModal(app)}>
+                            {t('recommender.updateStatus')}
+                          </Button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {totalPages > 1 && (
+                <div className="flex justify-between items-center mt-4">
+                  <span className="text-sm text-slate-600 dark:text-slate-400">{t('page')} {appCurrentPage} {t('of')} {totalPages}</span>
+                  <div className="space-x-2">
+                    <Button onClick={() => setAppCurrentPage(p => p - 1)} disabled={appCurrentPage === 1} size="sm">{t('previous')}</Button>
+                    <Button onClick={() => setAppCurrentPage(p => p + 1)} disabled={appCurrentPage === totalPages} size="sm">{t('next')}</Button>
+                  </div>
+                </div>
+              )}
             </Card>
             <Card title={t('admin.management.recommenderPayouts')}>
                 {Object.keys(pendingPayouts).length > 0 ? Object.keys(pendingPayouts).map(recommenderId => {
@@ -450,28 +554,50 @@ export function AdminDashboard({ user, currentView }: AdminDashboardProps) {
                 }) : <p>{t('admin.management.noPendingPayouts')}</p>}
             </Card>
         </div>
-    );
+      );
+    };
 
     const renderUserManagement = () => (
          <Card title={t('admin.userManagement')}>
-             <table className="w-full text-left">
-                <thead>
+             <table className="w-full text-left text-sm">
+                <thead className="bg-slate-50 dark:bg-slate-800">
                     <tr>
-                        <th>{t('admin.tableHeaderName')}</th>
-                        <th>{t('admin.tableHeaderEmail')}</th>
-                        <th>{t('admin.tableHeaderRole')}</th>
-                        <th>{t('admin.tableHeaderVerification')}</th>
-                        <th>{t('admin.tableHeaderActions')}</th>
+                        <th className="p-2">{t('admin.tableHeaderName')}</th>
+                        <th className="p-2">{t('admin.tableHeaderEmail')}</th>
+                        <th className="p-2">{t('admin.tableHeaderRole')}</th>
+                        <th className="p-2">{t('admin.status')}</th>
+                        <th className="p-2">{t('admin.tableHeaderActions')}</th>
                     </tr>
                 </thead>
                 <tbody>
                     {allUsers.map(u => (
-                        <tr key={u.uid} className="border-b">
-                            <td className="py-2">{u.name}</td>
+                        <tr key={u.uid} className="border-b dark:border-slate-700">
+                            <td className="p-2">{u.name}</td>
                             <td>{u.email}</td>
                             <td>{t(u.role)}</td>
-                            <td>{u.isVerified ? <span className="text-green-500">{t('admin.verified')}</span> : <span className="text-slate-500">{t('admin.notVerified')}</span>}</td>
-                            <td><Button size="sm" variant="secondary" onClick={() => handleOpenEditUser(u)}>{t('edit')}</Button></td>
+                            <td>
+                              <span className={`px-2 py-1 text-xs font-semibold rounded-full ${u.isDisabled ? 'bg-red-200 text-red-800' : 'bg-green-200 text-green-800'}`}>
+                                {u.isDisabled ? t('admin.userStatuses.disabled') : t('admin.userStatuses.active')}
+                              </span>
+                            </td>
+                            <td className="p-2 space-x-2">
+                                <Button 
+                                  size="sm" 
+                                  variant={u.isDisabled ? "secondary" : "danger"}
+                                  onClick={() => {setUserToModify(u); setIsDeactivateUserModalOpen(true);}}
+                                  disabled={u.uid === user.uid}
+                                >
+                                    {u.isDisabled ? t('admin.actions.activate') : t('admin.actions.deactivate')}
+                                </Button>
+                                <Button 
+                                  size="sm" 
+                                  variant="danger" 
+                                  onClick={() => {setUserToModify(u); setIsDeleteUserModalOpen(true);}}
+                                  disabled={u.uid === user.uid}
+                                >
+                                    {t('delete')}
+                                </Button>
+                            </td>
                         </tr>
                     ))}
                 </tbody>
@@ -577,28 +703,22 @@ export function AdminDashboard({ user, currentView }: AdminDashboardProps) {
                 
                 {renderContent()}
                 
-                <Modal isOpen={isEditUserModalOpen} onClose={() => setIsEditUserModalOpen(false)} title={t('admin.editUserTitle')}>
-                    <form onSubmit={handleUpdateUser} className="space-y-4">
-                        <div>
-                            <label className="block text-sm font-medium">{t('admin.tableHeaderName')}</label>
-                            <input type="text" value={editUserForm.name || ''} onChange={e => setEditUserForm({...editUserForm, name: e.target.value})} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" required />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-medium">{t('admin.role')}</label>
-                            <select value={editUserForm.role} onChange={e => setEditUserForm({...editUserForm, role: e.target.value as UserRole})} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md">
-                                {Object.values(UserRole).map(role => <option key={role} value={role}>{t(role)}</option>)}
-                            </select>
-                        </div>
-                        <div>
-                            <label className="flex items-center">
-                                <input type="checkbox" checked={editUserForm.isVerified || false} onChange={e => setEditUserForm({...editUserForm, isVerified: e.target.checked})} className="h-4 w-4 rounded border-slate-300 text-indigo-600" />
-                                <span className="ml-2 text-sm">{t('admin.verified')}</span>
-                            </label>
-                        </div>
-                        <div className="flex justify-end">
-                            <Button type="submit">{t('saveChanges')}</Button>
-                        </div>
-                    </form>
+                <Modal isOpen={isDeactivateUserModalOpen} onClose={() => setIsDeactivateUserModalOpen(false)} title={t(userToModify?.isDisabled ? 'admin.actions.confirmActivate' : 'admin.actions.confirmDeactivate')}>
+                    <p>{t(userToModify?.isDisabled ? 'admin.actions.activateMessage' : 'admin.actions.deactivateMessage', { name: userToModify?.name })}</p>
+                    <div className="flex justify-end space-x-2 mt-4">
+                        <Button variant="secondary" onClick={() => setIsDeactivateUserModalOpen(false)}>{t('cancel')}</Button>
+                        <Button variant={userToModify?.isDisabled ? 'secondary' : 'danger'} onClick={handleToggleUserDisabled}>
+                            {t(userToModify?.isDisabled ? 'admin.actions.activate' : 'admin.actions.deactivate')}
+                        </Button>
+                    </div>
+                </Modal>
+                <Modal isOpen={isDeleteUserModalOpen} onClose={() => setIsDeleteUserModalOpen(false)} title={t('admin.confirmDeletion')}>
+                    <p>{t('admin.confirmDeleteUser')} <strong>{userToModify?.name}</strong>?</p>
+                    <p className="text-sm text-red-600 mt-2">{t('admin.deleteUserWarning')}</p>
+                    <div className="flex justify-end space-x-2 mt-4">
+                        <Button variant="secondary" onClick={() => setIsDeleteUserModalOpen(false)}>{t('cancel')}</Button>
+                        <Button variant="danger" onClick={handleDeleteUser}>{t('admin.yesDeleteUser')}</Button>
+                    </div>
                 </Modal>
             </div>
 
@@ -656,6 +776,35 @@ export function AdminDashboard({ user, currentView }: AdminDashboardProps) {
                         </div>
                     </div>
                 )}
+            </Modal>
+
+            <Modal isOpen={isUpdateAppModalOpen} onClose={() => setIsUpdateAppModalOpen(false)} title={t('admin.management.updateStatusTitle')}>
+              {appToUpdate && (
+                <form onSubmit={handleUpdateAppStatus} className="space-y-4">
+                    <div>
+                      <h4 className="font-semibold">{t('admin.management.candidateInfo')}</h4>
+                      <p><strong>{t('name')}:</strong> {appToUpdate.seekerName}</p>
+                      {appToUpdate.cvUrl && <a href={appToUpdate.cvUrl} target="_blank" rel="noopener noreferrer" className="text-indigo-600 dark:text-indigo-400 hover:underline text-sm">{t('admin.management.viewCV')}</a>}
+                    </div>
+                    <div>
+                      <h4 className="font-semibold">{t('admin.management.recommenderInfo')}</h4>
+                      <p>{appToUpdate.recommenderName}</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium">{t('admin.management.tableHeaderStatus')}</label>
+                      <select value={newAppStatus} onChange={e => setNewAppStatus(e.target.value as ApplicationStatus)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md">
+                        <option value="under_review">{t('seeker.applicationStatus.under_review')}</option>
+                        <option value="interviewing">{t('seeker.applicationStatus.interviewing')}</option>
+                        <option value="company_rejected">{t('seeker.applicationStatus.company_rejected')}</option>
+                        <option value="hired">{t('seeker.applicationStatus.hired')}</option>
+                      </select>
+                    </div>
+                    <div className="flex justify-end space-x-2 pt-4">
+                        <Button type="button" variant="secondary" onClick={() => setIsUpdateAppModalOpen(false)}>{t('cancel')}</Button>
+                        <Button type="submit" disabled={isSaving}>{isSaving ? t('saving') : t('saveChanges')}</Button>
+                    </div>
+                </form>
+              )}
             </Modal>
         </>
     );

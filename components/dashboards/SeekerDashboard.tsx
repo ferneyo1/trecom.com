@@ -46,10 +46,10 @@ interface ShareContent {
 const ApplicationStatusTracker: React.FC<{ status: ApplicationStatus }> = ({ status }) => {
     const { t } = useLanguage();
     const steps = [
-        { name: t('seeker.tracker.step1'), statuses: ['submitted'] },
-        { name: t('seeker.tracker.step2'), statuses: ['recommender_rejected'] },
-        { name: t('seeker.tracker.step3'), statuses: ['forwarded_to_company'] },
-        { name: t('seeker.tracker.step4'), statuses: ['under_review', 'interviewing', 'company_rejected', 'hired'] },
+        { name: t('seeker.tracker.step1') },
+        { name: t('seeker.tracker.step2') },
+        { name: t('seeker.tracker.step3') },
+        { name: t('seeker.tracker.step4') },
     ];
 
     let currentStepIndex = 0;
@@ -132,6 +132,12 @@ const HeartIcon: React.FC<{ className?: string, solid?: boolean }> = ({ classNam
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 8.25c0-2.485-2.099-4.5-4.688-4.5-1.935 0-3.597 1.126-4.312 2.733-.715-1.607-2.377-2.733-4.313-2.733C5.1 3.75 3 5.765 3 8.25c0 7.22 9 12 9 12s9-4.78 9-12z" />
     </svg>
 );
+const EyeIcon: React.FC<{ className?: string }> = ({ className }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={className}>
+      <path d="M10 12.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5z" />
+      <path fillRule="evenodd" d="M.664 10.59a1.651 1.651 0 010-1.18l.88-1.48a1.651 1.651 0 011.332-.906H4.25a1.651 1.651 0 011.332.906l.88 1.48a1.651 1.651 0 010 1.18l-.88 1.48a1.651 1.651 0 01-1.332.906H2.876a1.651 1.651 0 01-1.332-.906L.664 10.59zM10 15.25a5.25 5.25 0 005.25-5.25.75.75 0 00-1.5 0 3.75 3.75 0 01-3.75 3.75.75.75 0 000 1.5z" clipRule="evenodd" />
+    </svg>
+);
 
 
 // FIX: Export function directly to create a named export.
@@ -183,6 +189,7 @@ export function SeekerDashboard({ user }: SeekerDashboardProps) {
 
   const [isJobDetailsModalOpen, setIsJobDetailsModalOpen] = React.useState(false);
   const [selectedJob, setSelectedJob] = React.useState<Job | null>(null);
+  const [selectedJobRecommenderDetails, setSelectedJobRecommenderDetails] = React.useState<{email: string; phone: string} | null>(null);
   
   // History and Rating State
   const [jobApplications, setJobApplications] = React.useState<JobApplication[]>([]);
@@ -197,7 +204,8 @@ export function SeekerDashboard({ user }: SeekerDashboardProps) {
   // Pagination State
   const [jobAppsPage, setJobAppsPage] = React.useState(1);
   const [serviceRequestsPage, setServiceRequestsPage] = React.useState(1);
-  const ITEMS_PER_PAGE = 5;
+  const JOB_APPS_PER_PAGE = 5;
+  const SERVICE_REQUESTS_PER_PAGE = 2;
 
   // Job Application Flow State
   const [isPaywallModalOpen, setIsPaywallModalOpen] = React.useState(false);
@@ -431,12 +439,19 @@ export function SeekerDashboard({ user }: SeekerDashboardProps) {
         });
 
         const filteredJobs = allJobs.filter(job => {
-            const keywordMatch = jobSearchKeyword 
-                ? (job.title.toLowerCase().includes(jobSearchKeyword.toLowerCase()) ||
-                   job.company.toLowerCase().includes(jobSearchKeyword.toLowerCase()) ||
-                   job.description.toLowerCase().includes(jobSearchKeyword.toLowerCase()) ||
-                   job.tasks?.some(t => t.toLowerCase().includes(jobSearchKeyword.toLowerCase())))
-                : true;
+            const keywordMatch = jobSearchKeyword ? (() => {
+                const searchWords = jobSearchKeyword.toLowerCase().split(' ').filter(word => word.length > 0);
+                if (searchWords.length === 0) return true;
+        
+                const jobText = [
+                    job.title,
+                    job.company,
+                    job.description,
+                    ...(job.tasks || [])
+                ].join(' ').toLowerCase();
+        
+                return searchWords.every(word => jobText.includes(word));
+            })() : true;
             
             const cityMatch = jobSearchCity 
                 ? job.city?.toLowerCase().includes(jobSearchCity.toLowerCase())
@@ -558,25 +573,31 @@ export function SeekerDashboard({ user }: SeekerDashboardProps) {
             });
         }
         
-        const requestData: Omit<ServiceRequest, 'id' | 'createdAt' | 'attendedDate'> = {
+        // Build the payload dynamically to avoid undefined values.
+        const requestPayload: { [key: string]: any } = {
             seekerId: user.uid,
             seekerName: user.name,
             seekerEmail: user.email,
-            seekerPhone: seekerProfile?.phoneNumber,
             professionalId: selectedProfessional.uid,
             professionalName: selectedProfessional.name,
-            requestSubject: requestSubject,
             requestDetails: requestDetails,
-            requestPhotoURL: photoURL,
             status: RequestStatus.LOCKED,
-            serviceDate: serviceDate || undefined,
-            serviceTime: serviceTime || undefined,
-            seekerLocation: requestLocationInput || requestLocation || undefined
-        };
-        await addDoc(collection(db, 'serviceRequests'), {
-            ...requestData,
             createdAt: serverTimestamp(),
-        });
+        };
+
+        if (seekerProfile?.phoneNumber) requestPayload.seekerPhone = seekerProfile.phoneNumber;
+        if (requestSubject) requestPayload.requestSubject = requestSubject;
+        if (photoURL) requestPayload.requestPhotoURL = photoURL;
+        if (serviceDate) requestPayload.serviceDate = serviceDate;
+        if (serviceTime) requestPayload.serviceTime = serviceTime;
+
+        const location = requestLocationInput || requestLocation;
+        if (location) {
+            requestPayload.seekerLocation = location;
+        }
+        
+        await addDoc(collection(db, 'serviceRequests'), requestPayload);
+
         setNotification(t('seeker.requestSentSuccessfully'));
         setTimeout(() => setNotification(null), 3000);
         setIsContactModalOpen(false);
@@ -614,9 +635,50 @@ export function SeekerDashboard({ user }: SeekerDashboardProps) {
     }
   };
 
-  const handleOpenJobDetails = (job: Job) => {
+  const handleOpenJobDetails = async (job: Job) => {
     setSelectedJob(job);
     setIsJobDetailsModalOpen(true);
+    setSelectedJobRecommenderDetails(null); // Reset on open
+
+    try {
+        const recommenderUserDoc = await getDoc(doc(db, 'users', job.recommenderId));
+        const recommenderProfileDoc = await getDoc(doc(db, 'recommenders', job.recommenderId));
+
+        const email = recommenderUserDoc.exists() ? recommenderUserDoc.data().email : t('seeker.notSpecified');
+        const phone = recommenderProfileDoc.exists() ? recommenderProfileDoc.data()?.phone : t('seeker.notSpecified');
+        
+        setSelectedJobRecommenderDetails({ email, phone: phone || t('seeker.notSpecified') });
+    } catch (e) {
+        console.error("Error fetching recommender details:", e);
+        setSelectedJobRecommenderDetails({ email: t('errorDefault'), phone: t('errorDefault') });
+    }
+  };
+
+  const handleViewAppliedJob = async (application: JobApplication) => {
+    try {
+        const jobRef = doc(db, 'jobs', application.jobId);
+        const jobSnap = await getDoc(jobRef);
+        if (jobSnap.exists()) {
+            const jobData = jobSnap.data();
+            const sanitizedData: any = {};
+            for (const key in jobData) {
+                if (jobData[key] instanceof Timestamp) {
+                    sanitizedData[key] = jobData[key].toDate().toISOString();
+                } else {
+                    sanitizedData[key] = jobData[key];
+                }
+            }
+            const fetchedJob = { id: jobSnap.id, ...sanitizedData } as Job;
+            handleOpenJobDetails(fetchedJob);
+        } else {
+            setNotification(t('publicJobView.jobNotFound'));
+            setTimeout(() => setNotification(null), 3000);
+        }
+    } catch (error) {
+        console.error("Error fetching job details:", error);
+        setNotification(t('publicJobView.errorLoadingJob'));
+        setTimeout(() => setNotification(null), 3000);
+    }
   };
   
   const handleOpenPaywall = (job: Job) => {
@@ -1031,8 +1093,67 @@ export function SeekerDashboard({ user }: SeekerDashboardProps) {
             setIsSending(false);
         }
     };
+
+    const handleOpenDeleteRequestModal = (req: ServiceRequest) => {
+        setRequestToDelete(req);
+        setIsDeleteRequestModalOpen(true);
+    };
+
+    const handleConfirmDeleteOrCancelRequest = async () => {
+        if (!requestToDelete) return;
+        setIsSending(true);
+        try {
+            await deleteDoc(doc(db, 'serviceRequests', requestToDelete.id));
+            if (requestToDelete.attendedDate) {
+                setNotification(t('seeker.deleteRequest.success'));
+            } else {
+                setNotification(t('seeker.requestCancelledSuccessfully'));
+            }
+            setIsDeleteRequestModalOpen(false);
+        } catch (error) {
+            console.error("Error modifying request:", error);
+            setNotification(t('seeker.deleteRequest.error'));
+        } finally {
+            setIsSending(false);
+        }
+    };
+
+    const handleOpenEditRequest = (req: ServiceRequest) => {
+        setRequestToEdit(req);
+        setEditRequestDetails(req.requestDetails);
+        setEditServiceDate(req.serviceDate || '');
+        setEditServiceTime(req.serviceTime || '');
+        setIsEditRequestModalOpen(true);
+    };
+
+    const handleUpdateRequest = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!requestToEdit) return;
+        setIsSending(true);
+        try {
+            const requestRef = doc(db, 'serviceRequests', requestToEdit.id);
+            await updateDoc(requestRef, {
+                requestDetails: editRequestDetails,
+                serviceDate: editServiceDate,
+                serviceTime: editServiceTime,
+            });
+            setNotification(t('seeker.requestUpdated'));
+            setIsEditRequestModalOpen(false);
+        } catch (error) {
+            console.error("Error updating request:", error);
+        } finally {
+            setIsSending(false);
+        }
+    };
     
     // --- JSX FOR THE COMPONENT ---
+    const totalServiceRequestPages = Math.ceil(filteredServiceRequests.length / SERVICE_REQUESTS_PER_PAGE);
+    const currentServiceRequests = filteredServiceRequests.slice((serviceRequestsPage - 1) * SERVICE_REQUESTS_PER_PAGE, serviceRequestsPage * SERVICE_REQUESTS_PER_PAGE);
+
+    const totalJobAppPages = Math.ceil(filteredJobApps.length / JOB_APPS_PER_PAGE);
+    const currentJobApps = filteredJobApps.slice((jobAppsPage - 1) * JOB_APPS_PER_PAGE, jobAppsPage * JOB_APPS_PER_PAGE);
+
+
     return (
         <>
             <Toast message={notification} onClose={() => setNotification(null)} />
@@ -1159,14 +1280,18 @@ export function SeekerDashboard({ user }: SeekerDashboardProps) {
                     <Card title={t('seeker.myJobApplications')} icon={<ClipboardDocumentListIcon />}>
                          <input type="text" placeholder={t('seeker.searchInMyApps')} value={jobAppSearchTerm} onChange={e => setJobAppSearchTerm(e.target.value)} className="w-full px-3 py-2 mb-4 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md" />
                         {filteredJobApps.length > 0 ? (
+                            <>
                              <ul className="space-y-4">
-                                {filteredJobApps.slice((jobAppsPage - 1) * ITEMS_PER_PAGE, jobAppsPage * ITEMS_PER_PAGE).map(app => (
+                                {currentJobApps.map(app => (
                                     <li key={app.id} className="p-3 bg-slate-100 dark:bg-slate-800 rounded-md">
                                         <p className="font-bold">{app.jobTitle}</p>
                                         <p className="text-sm text-slate-500">{app.jobCompany}</p>
                                         <p className="text-xs text-slate-400">{t('seeker.appliedOn')} {new Date(app.appliedAt).toLocaleDateString()}</p>
                                         <ApplicationStatusTracker status={app.status}/>
                                         <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t">
+                                            <Button size="sm" variant="secondary" onClick={() => handleViewAppliedJob(app)} title={t('seeker.viewJobOffer')}>
+                                                <EyeIcon className="w-4 h-4" />
+                                            </Button>
                                             <Button size="sm" variant="secondary" onClick={() => handleOpenEditApp(app)}><PencilIcon className="w-4 h-4 mr-1"/>{t('edit')}</Button>
                                             <Button size="sm" variant="danger" onClick={() => handleOpenDeleteApp(app)}><TrashIcon className="w-4 h-4 mr-1"/>{t('seeker.withdraw')}</Button>
                                             {!app.recommenderRating && <Button size="sm" onClick={() => { setSelectedApplication(app); setIsRecommenderRatingModalOpen(true); }}>{t('seeker.rate')}</Button>}
@@ -1174,14 +1299,25 @@ export function SeekerDashboard({ user }: SeekerDashboardProps) {
                                     </li>
                                 ))}
                             </ul>
+                            {totalJobAppPages > 1 && (
+                                <div className="flex justify-between items-center mt-4">
+                                    <span className="text-sm text-slate-600 dark:text-slate-400">{t('page')} {jobAppsPage} {t('of')} {totalJobAppPages}</span>
+                                    <div className="space-x-2">
+                                        <Button onClick={() => setJobAppsPage(p => p - 1)} disabled={jobAppsPage === 1} size="sm">{t('previous')}</Button>
+                                        <Button onClick={() => setJobAppsPage(p => p + 1)} disabled={jobAppsPage >= totalJobAppPages} size="sm">{t('next')}</Button>
+                                    </div>
+                                </div>
+                            )}
+                            </>
                         ) : <p className="text-slate-500">{t('seeker.noApplicationsYet')}</p>}
                     </Card>
 
                      <Card title={t('seeker.myServiceRequests')} icon={<ClipboardDocumentListIcon />}>
                          <input type="text" placeholder={t('seeker.searchInMyRequests')} value={serviceRequestSearchTerm} onChange={e => setServiceRequestSearchTerm(e.target.value)} className="w-full px-3 py-2 mb-4 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md" />
                         {filteredServiceRequests.length > 0 ? (
+                            <>
                              <ul className="space-y-4">
-                                {filteredServiceRequests.slice((serviceRequestsPage - 1) * ITEMS_PER_PAGE, serviceRequestsPage * ITEMS_PER_PAGE).map(req => {
+                                {currentServiceRequests.map(req => {
                                     const statusInfo = getRequestStatusInfo(req);
                                     return (
                                         <li key={req.id} className="p-3 bg-slate-100 dark:bg-slate-800 rounded-md">
@@ -1194,13 +1330,27 @@ export function SeekerDashboard({ user }: SeekerDashboardProps) {
                                             <p className="text-sm mt-1 italic">"{req.requestDetails}"</p>
                                             <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t">
                                                 {!req.clientRating && req.attendedDate && <Button size="sm" onClick={() => { setSelectedRequest(req); setIsProfRatingModalOpen(true); }}>{t('seeker.rate')}</Button>}
-                                                {!req.attendedDate && <Button size="sm" variant="secondary" onClick={() => {}}><PencilIcon className="w-4 h-4 mr-1"/>{t('edit')}</Button>}
-                                                {!req.attendedDate && <Button size="sm" variant="danger" onClick={() => {}}><TrashIcon className="w-4 h-4 mr-1"/>{t('seeker.cancelRequest')}</Button>}
+                                                {!req.attendedDate && <Button size="sm" variant="secondary" onClick={() => handleOpenEditRequest(req)}><PencilIcon className="w-4 h-4 mr-1"/>{t('edit')}</Button>}
+                                                {req.attendedDate && req.clientRating ? (
+                                                    <Button size="sm" variant="danger" onClick={() => handleOpenDeleteRequestModal(req)}><TrashIcon className="w-4 h-4 mr-1"/>{t('delete')}</Button>
+                                                ) : (
+                                                    !req.attendedDate && <Button size="sm" variant="danger" onClick={() => handleOpenDeleteRequestModal(req)}><TrashIcon className="w-4 h-4 mr-1"/>{t('seeker.cancelRequest')}</Button>
+                                                )}
                                             </div>
                                         </li>
                                     );
                                 })}
                             </ul>
+                            {totalServiceRequestPages > 1 && (
+                                <div className="flex justify-between items-center mt-4">
+                                    <span className="text-sm text-slate-600 dark:text-slate-400">{t('page')} {serviceRequestsPage} {t('of')} {totalServiceRequestPages}</span>
+                                    <div className="space-x-2">
+                                        <Button onClick={() => setServiceRequestsPage(p => p - 1)} disabled={serviceRequestsPage === 1} size="sm">{t('previous')}</Button>
+                                        <Button onClick={() => setServiceRequestsPage(p => p + 1)} disabled={serviceRequestsPage >= totalServiceRequestPages} size="sm">{t('next')}</Button>
+                                    </div>
+                                </div>
+                            )}
+                            </>
                         ) : <p className="text-slate-500">{t('seeker.noRequestsYet')}</p>}
                     </Card>
                 </div>
@@ -1274,7 +1424,15 @@ export function SeekerDashboard({ user }: SeekerDashboardProps) {
                          
                          <div className="pt-3 border-t border-slate-200 dark:border-slate-700">
                              <h4 className="font-semibold text-slate-800 dark:text-slate-200">{t('seeker.recommendedBy')}</h4>
-                            <p>{selectedJob.recommenderName}</p>
+                            <p><strong>{t('name')}:</strong> {selectedJob.recommenderName}</p>
+                            {selectedJobRecommenderDetails ? (
+                                <>
+                                    <p><strong>{t('email')}:</strong> {selectedJobRecommenderDetails.email}</p>
+                                    <p><strong>{t('phone')}:</strong> {selectedJobRecommenderDetails.phone}</p>
+                                </>
+                            ) : (
+                                <p>{t('loading')}...</p>
+                            )}
                          </div>
                          
                          {isUnlocked && (
@@ -1420,74 +1578,4 @@ export function SeekerDashboard({ user }: SeekerDashboardProps) {
                         {/* Contact Form */}
                         <form onSubmit={handleSendRequest} className="space-y-4 pt-4 border-t border-slate-200 dark:border-slate-700">
                              <div>
-                                <label className="block text-sm font-medium">{t('seeker.requestSubject')}</label>
-                                <input type="text" value={requestSubject} onChange={e => setRequestSubject(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" required />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium">{t('seeker.describeNeed')}</label>
-                                <textarea value={requestDetails} onChange={e => setRequestDetails(e.target.value)} rows={3} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" />
-                            </div>
-                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                <div>
-                                    <label className="block text-sm font-medium">{t('seeker.serviceDay')}</label>
-                                    <input type="date" value={serviceDate} onChange={e => setServiceDate(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" />
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium">{t('seeker.serviceTime')}</label>
-                                    <input type="time" value={serviceTime} onChange={e => setServiceTime(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" />
-                                </div>
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium">{t('seeker.locationOptional')}</label>
-                                <div className="flex items-center space-x-2">
-                                    <input type="text" value={requestLocationInput} onChange={e => setRequestLocationInput(e.target.value)} placeholder={t('seeker.locationPlaceholder')} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" />
-                                    <Button type="button" variant="secondary" onClick={handleShareLocation}>{t('seeker.share')}</Button>
-                                </div>
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium">{t('seeker.attachPhotoOptional')}</label>
-                                <input type="file" accept="image/*" onChange={(e) => setRequestPhotoFile(e.target.files ? e.target.files[0] : null)} className="mt-1 block w-full text-sm" />
-                            </div>
-                            {requestPhotoUploadProgress !== null && (
-                                <div>
-                                    <label className="block text-sm font-medium">{t('seeker.uploadProgress')}</label>
-                                    <div className="w-full bg-slate-200 rounded-full h-2.5 dark:bg-slate-700">
-                                        <div className="bg-indigo-600 h-2.5 rounded-full" style={{ width: `${requestPhotoUploadProgress}%` }}></div>
-                                    </div>
-                                </div>
-                            )}
-                            <div className="flex justify-end pt-2 space-x-2">
-                                <Button type="button" variant="secondary" onClick={() => setIsContactModalOpen(false)}>{t('cancel')}</Button>
-                                <Button type="submit" disabled={isSending}>{isSending ? (requestPhotoUploadProgress !== null ? `${t('seeker.uploading')} ${requestPhotoUploadProgress.toFixed(0)}%` : t('sending')) : t('seeker.confirmRequest')}</Button>
-                            </div>
-                        </form>
-                    </div>
-                )}
-            </Modal>
-            <Modal isOpen={isRecommenderRatingModalOpen} onClose={() => setIsRecommenderRatingModalOpen(false)} title={`${t('seeker.rateRecommender')} ${selectedApplication?.recommenderName}`}>
-                <form onSubmit={handleRateRecommender} className="space-y-4">
-                    <p className="text-slate-500">{t('seeker.opinionHelps')}</p>
-                    <div className="flex justify-center py-4">
-                        <StarRating rating={recommenderRating} setRating={setRecommenderRating} size="lg" />
-                    </div>
-                    <div className="flex justify-end pt-2 space-x-2">
-                        <Button type="button" variant="secondary" onClick={() => setIsRecommenderRatingModalOpen(false)}>{t('cancel')}</Button>
-                        <Button type="submit" disabled={isSending || recommenderRating === 0}>{isSending ? t('saving') : t('seeker.sendRating')}</Button>
-                    </div>
-                </form>
-            </Modal>
-            <Modal isOpen={isProfRatingModalOpen} onClose={() => setIsProfRatingModalOpen(false)} title={`${t('seeker.rateProfessional')} ${selectedRequest?.professionalName}`}>
-                <form onSubmit={handleRateProfessional} className="space-y-4">
-                    <p className="text-slate-500">{t('seeker.opinionCommunity')}</p>
-                    <div className="flex justify-center py-4">
-                        <StarRating rating={professionalRating} setRating={setProfessionalRating} size="lg" />
-                    </div>
-                    <div className="flex justify-end pt-2 space-x-2">
-                        <Button type="button" variant="secondary" onClick={() => setIsProfRatingModalOpen(false)}>{t('cancel')}</Button>
-                        <Button type="submit" disabled={isSending || professionalRating === 0}>{isSending ? t('saving') : t('seeker.sendRating')}</Button>
-                    </div>
-                </form>
-            </Modal>
-        </>
-    );
-}
+                                <label className="block text-sm font-medium">{t('seeker.requestSubject')}</
