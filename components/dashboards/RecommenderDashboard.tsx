@@ -332,7 +332,6 @@ function RecommenderDashboard({ user }: RecommenderDashboardProps) {
                 to: [user.email],
                 message: {
                     subject: t('emails.recommender.jobPublishedSubject'),
-                    // FIX: Use `t` function with replacements object instead of chained .replace() calls.
                     html: t('emails.recommender.jobPublishedBody', { name: user.name, jobTitle: jobTitle }),
                 },
             });
@@ -486,9 +485,7 @@ function RecommenderDashboard({ user }: RecommenderDashboardProps) {
         const mailPayload = {
             to: [jobForApplicants.contactEmail],
             message: {
-                // FIX: Use `t` function with replacements object instead of chained .replace() calls.
                 subject: t('emails.recommender.forwardedToCompanySubject', { applicationId: app.id }),
-                // FIX: Use `t` function with replacements object instead of chained .replace() calls.
                 html: t('emails.recommender.forwardedToCompanyBody', {
                     companyName: jobForApplicants.company,
                     seekerName: app.seekerName || 'N/A',
@@ -580,7 +577,6 @@ function RecommenderDashboard({ user }: RecommenderDashboardProps) {
 
   const handleOpenShareModal = (job: Job) => {
     const url = `${window.top.location.origin}${window.top.location.pathname}?view=job&id=${job.id}`;
-    // FIX: Use `t` function with replacements object instead of chained .replace() calls.
     const text = t('recommender.shareJob.text', { jobTitle: job.title, companyName: job.company });
 
     setShareContent({

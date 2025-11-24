@@ -1,4 +1,3 @@
-// Fix: Removed invalid 'aistudio' token from import statement to resolve syntax error.
 import React from 'react';
 import { User, UserRole, ProfessionalProfile, RequestStatus, SeekerProfile, Job, Membership, JobApplication, ServiceRequest, RecommenderProfile, RecommenderPayoutSettings, ApplicationStatus } from '../../types';
 import { Card } from '../shared/Card';
@@ -140,7 +139,6 @@ const EyeIcon: React.FC<{ className?: string }> = ({ className }) => (
 );
 
 
-// FIX: Export function directly to create a named export.
 export function SeekerDashboard({ user }: SeekerDashboardProps) {
   const { t } = useLanguage();
   // Search State
@@ -1578,4 +1576,114 @@ export function SeekerDashboard({ user }: SeekerDashboardProps) {
                         {/* Contact Form */}
                         <form onSubmit={handleSendRequest} className="space-y-4 pt-4 border-t border-slate-200 dark:border-slate-700">
                              <div>
-                                <label className="block text-sm font-medium">{t('seeker.requestSubject')}</
+                                <label className="block text-sm font-medium">{t('seeker.requestSubject')}</label>
+                                <input type="text" value={requestSubject} onChange={e => setRequestSubject(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" required />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium">{t('seeker.describeNeed')}</label>
+                                <textarea value={requestDetails} onChange={e => setRequestDetails(e.target.value)} rows={4} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" required />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium">{t('seeker.attachPhotoOptional')}</label>
+                                <input type="file" accept="image/*" onChange={e => setRequestPhotoFile(e.target.files ? e.target.files[0] : null)} className="mt-1 block w-full text-sm"/>
+                                {requestPhotoUploadProgress !== null && (
+                                    <div className="w-full bg-slate-200 rounded-full h-2.5 dark:bg-slate-700 mt-2">
+                                        <div className="bg-indigo-600 h-2.5 rounded-full" style={{ width: `${requestPhotoUploadProgress}%` }}></div>
+                                    </div>
+                                )}
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium">{t('seeker.serviceDay')}</label>
+                                    <input type="date" value={serviceDate} onChange={e => setServiceDate(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium">{t('seeker.serviceTime')}</label>
+                                    <input type="time" value={serviceTime} onChange={e => setServiceTime(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" />
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium">{t('seeker.locationOptional')}</label>
+                                <div className="flex items-center space-x-2">
+                                    <input type="text" value={requestLocationInput} onChange={e => setRequestLocationInput(e.target.value)} placeholder={t('seeker.locationPlaceholder')} className="flex-grow block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md" />
+                                    <Button type="button" variant="secondary" onClick={handleShareLocation} title={t('seeker.shareCurrentLocation')}>
+                                        {t('seeker.share')}
+                                    </Button>
+                                </div>
+                            </div>
+                            <div className="flex justify-end pt-4">
+                                <Button type="submit" disabled={isSending}>
+                                    {isSending ? (requestPhotoUploadProgress !== null ? `${t('seeker.uploading')} ${requestPhotoUploadProgress.toFixed(0)}%` : t('saving')) : t('seeker.confirmRequest')}
+                                </Button>
+                            </div>
+                        </form>
+                    </div>
+                )}
+            </Modal>
+
+            <Modal isOpen={isShareModalOpen} onClose={() => setIsShareModalOpen(false)} title={shareContent?.title || ''}>
+                <div className="space-y-4">
+                    <p className="text-sm text-slate-500">{t('recommender.shareJob.description')}</p>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
+                        <a href={`https://wa.me/?text=${encodeURIComponent(shareContent?.text + ' ' + shareContent?.url)}`} target="_blank" rel="noopener noreferrer" className="p-4 bg-slate-100 dark:bg-slate-700 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"><p>WhatsApp</p></a>
+                        <a href={`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(shareContent?.url || '')}`} target="_blank" rel="noopener noreferrer" className="p-4 bg-slate-100 dark:bg-slate-700 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"><p>Facebook</p></a>
+                        <a href={`https://twitter.com/intent/tweet?url=${encodeURIComponent(shareContent?.url || '')}&text=${encodeURIComponent(shareContent?.text || '')}`} target="_blank" rel="noopener noreferrer" className="p-4 bg-slate-100 dark:bg-slate-700 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"><p>Twitter</p></a>
+                        <a href={`https://www.linkedin.com/shareArticle?mini=true&url=${encodeURIComponent(shareContent?.url || '')}&title=${encodeURIComponent(shareContent?.title || '')}&summary=${encodeURIComponent(shareContent?.text || '')}`} target="_blank" rel="noopener noreferrer" className="p-4 bg-slate-100 dark:bg-slate-700 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"><p>LinkedIn</p></a>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                        <input type="text" readOnly value={shareContent?.url} className="w-full px-3 py-2 bg-slate-100 dark:bg-slate-700 border rounded-md" />
+                        <Button onClick={handleCopyToClipboard} variant="secondary">{t('seeker.copyToClipboard')}</Button>
+                    </div>
+                </div>
+            </Modal>
+
+            <Modal isOpen={isRecommenderRatingModalOpen} onClose={() => setIsRecommenderRatingModalOpen(false)} title={`${t('seeker.rateRecommender')} ${selectedApplication?.recommenderName}`}>
+                <form onSubmit={handleRateRecommender}>
+                    <p className="text-center mb-4">{t('seeker.opinionHelps')}</p>
+                    <div className="flex justify-center mb-4">
+                        <StarRating rating={recommenderRating} setRating={setRecommenderRating} size="lg"/>
+                    </div>
+                    <Button type="submit" disabled={isSending} className="w-full">{isSending ? t('saving') : t('seeker.sendRating')}</Button>
+                </form>
+            </Modal>
+            <Modal isOpen={isProfRatingModalOpen} onClose={() => setIsProfRatingModalOpen(false)} title={`${t('seeker.rateProfessional')} ${selectedRequest?.professionalName}`}>
+                <form onSubmit={handleRateProfessional}>
+                    <p className="text-center mb-4">{t('seeker.opinionCommunity')}</p>
+                    <div className="flex justify-center mb-4">
+                        <StarRating rating={professionalRating} setRating={setProfessionalRating} size="lg"/>
+                    </div>
+                    <Button type="submit" disabled={isSending} className="w-full">{isSending ? t('saving') : t('seeker.sendRating')}</Button>
+                </form>
+            </Modal>
+            <Modal isOpen={isDeleteRequestModalOpen} onClose={() => setIsDeleteRequestModalOpen(false)} title={requestToDelete?.attendedDate ? t('seeker.deleteRequest.title') : t('seeker.cancelServiceRequest')}>
+                <p>{requestToDelete?.attendedDate ? t('seeker.deleteRequest.message') : t('seeker.confirmCancelRequest')}</p>
+                <div className="flex justify-end space-x-3 pt-4 mt-2">
+                    <Button variant="secondary" onClick={() => setIsDeleteRequestModalOpen(false)}>{requestToDelete?.attendedDate ? t('cancel') : t('seeker.noKeep')}</Button>
+                    <Button variant="danger" onClick={handleConfirmDeleteOrCancelRequest} disabled={isSending}>{isSending ? (requestToDelete?.attendedDate ? t('deleting') : t('seeker.cancelling')) : (requestToDelete?.attendedDate ? t('seeker.deleteRequest.confirm') : t('seeker.yesCancel'))}</Button>
+                </div>
+            </Modal>
+            <Modal isOpen={isEditRequestModalOpen} onClose={() => setIsEditRequestModalOpen(false)} title={t('seeker.editRequest', { name: requestToEdit?.professionalName })}>
+                <form onSubmit={handleUpdateRequest} className="space-y-4">
+                    <div>
+                        <label>{t('seeker.requestDetails')}</label>
+                        <textarea value={editRequestDetails} onChange={e => setEditRequestDetails(e.target.value)} rows={4} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md"/>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label>{t('seeker.serviceDay')}</label>
+                            <input type="date" value={editServiceDate} onChange={e => setEditServiceDate(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md"/>
+                        </div>
+                        <div>
+                            <label>{t('seeker.serviceTime')}</label>
+                            <input type="time" value={editServiceTime} onChange={e => setEditServiceTime(e.target.value)} className="mt-1 block w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-md"/>
+                        </div>
+                    </div>
+                    <div className="flex justify-end space-x-2 pt-2">
+                        <Button type="button" variant="secondary" onClick={() => setIsEditRequestModalOpen(false)}>{t('cancel')}</Button>
+                        <Button type="submit" disabled={isSending}>{isSending ? t('saving') : t('saveChanges')}</Button>
+                    </div>
+                </form>
+            </Modal>
+        </>
+    );
+}

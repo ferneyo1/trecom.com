@@ -246,7 +246,6 @@ export function AdminDashboard({ user, currentView }: AdminDashboardProps) {
                     setEmailStatus({ status: 'success', message: t('admin.statusSuccess') });
                     setIsSendingEmail(false);
                 } else if (data?.delivery?.state === 'ERROR') {
-                    // FIX: Use `t` function with replacements object instead of chained .replace() calls.
                     setEmailStatus({ status: 'error', message: t('admin.statusError', { error: data.delivery.error || 'Unknown error' }) });
                     setIsSendingEmail(false);
                 }
@@ -265,7 +264,6 @@ export function AdminDashboard({ user, currentView }: AdminDashboardProps) {
                 to: [profile.email],
                 message: {
                     subject: t('emails.professional.profileApprovedSubject'),
-                    // FIX: Use `t` function with replacements object instead of chained .replace() calls.
                     html: t('emails.professional.profileApprovedBody', { name: profile.name || 'Professional' }),
                 },
             });
@@ -298,7 +296,6 @@ export function AdminDashboard({ user, currentView }: AdminDashboardProps) {
                     to: [recommenderDoc.data().email],
                     message: {
                         subject: t('emails.recommender.jobVerifiedSubject'),
-                        // FIX: Use `t` function with replacements object instead of chained .replace() calls.
                         html: t('emails.recommender.jobVerifiedBody', { name: job.recommenderName, jobTitle: job.title, amount: payoutSettings.perVerifiedJob }),
                     },
                 });

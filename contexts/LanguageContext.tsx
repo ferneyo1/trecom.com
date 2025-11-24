@@ -6,7 +6,7 @@ type Language = 'es' | 'en' | 'fr';
 interface LanguageContextType {
   language: Language;
   setLanguage: (language: Language) => void;
-  // FIX: Add replacements parameter to the `t` function signature to allow for dynamic values in translations.
+  // FIX: Added replacements parameter to the `t` function signature to allow for dynamic values in translations.
   t: (key: string, replacements?: { [key: string]: string | number | undefined }) => any; // Allow returning strings, objects, or arrays
 }
 

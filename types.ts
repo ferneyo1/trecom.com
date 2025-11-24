@@ -18,6 +18,7 @@ export interface User {
   averageRating?: number;
   ratingCount?: number;
   isVerified?: boolean;
+  isDisabled?: boolean;
 }
 
 export interface Membership {
@@ -75,6 +76,7 @@ export interface SeekerProfile {
   city?: string;
   photoURL?: string;
   favoriteJobs?: string[];
+  favoriteProfessionals?: string[];
 }
 
 export interface RecommenderProfile {
@@ -159,4 +161,13 @@ export interface Payment {
   notes?: string;
   proofURL?: string;
   earningIds: string[];
+}
+
+export interface Notification {
+    id: string;
+    userId: string;
+    message: string;
+    createdAt: any;
+    isRead: boolean;
+    link?: string;
 }
